@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.0";
+const VERSION = "v2.11";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -64,25 +64,63 @@ function onOpen() {
     .addItem('3. Generate Printable Event Forms', 'generateEventFormReport')
     .addSeparator()
     .addItem('4. Check PR Setup (debug)',          'checkPRSetup')
+    .addItem('5. Check Meet Roster (debug)',         'checkMeetRoster')
     .addToUi();
 }
 
 // ── CHECKBOX BUTTON HANDLER ───────────────────────────────────
 // The Home tab has styled checkbox cells that act as buttons.
-// onEdit fires whenever a cell changes; we intercept the two
-// button checkboxes in col A and call the appropriate function.
+// This function must be registered as an INSTALLABLE trigger to work
+// reliably (toast feedback, flush, getUi). See the Setup Checklist on
+// the Home tab for instructions. Function name: onEditInstallable.
+//
+// Simple onEdit() is intentionally left absent — the installable trigger
+// replaces it entirely, avoiding the double-fire problem.
 
-function onEdit(e) {
+function onEditInstallable(e) {
   if (!e || !e.range) return;
   const sheet = e.range.getSheet();
   if (sheet.getName() !== 'Home') return;
   if (e.range.getColumn() !== 1) return;
-  if (e.range.getValue() !== true) return; // only act on the check, not uncheck
+  if (e.range.getValue() !== true) return;
 
   const row = e.range.getRow();
-  e.range.setValue(false); // immediately uncheck so it looks like a button
+  e.range.setValue(false); // reset immediately so it looks like a button
+  if (row !== 6 && row !== 7) return;
+
+  const home       = e.range.getSheet();
+  const ss         = SpreadsheetApp.getActiveSpreadsheet();
+  const meetNum    = home.getRange("B3").getValue();
+  const gender     = home.getRange("B4").getValue();
+  const statusCell = home.getRange("A8:B8");
+
+  // Clear any previous status from the status cell
+  statusCell.merge().setValue("").setBackground(null).setFontColor("#000000").setFontWeight("normal");
+
+  if (!meetNum || !gender) {
+    statusCell
+      .setValue("⚠️  Select a Meet # and Gender above first.")
+      .setBackground("#ea9999").setFontColor("#990000").setFontWeight("bold");
+    return;
+  }
+
+  const label = row === 6 ? "Lineup" : "Event Forms";
+
+  // Show "generating" state — flush() pushes this to the browser immediately
+  // when running as an installable trigger. Expect 2–5 sec startup delay before
+  // anything appears; that's GAS spinning up, not a bug.
+  statusCell
+    .setValue("⏳  Generating " + label + "…  (5–15 sec startup delay is normal)")
+    .setBackground("#fff2cc").setFontColor("#7f6000").setFontWeight("bold");
+  SpreadsheetApp.flush();
+
   if (row === 6) generateLineupReport();
   if (row === 7) generateEventFormReport();
+
+  // Persistent green "done" — stays visible so there's no question it finished
+  statusCell
+    .setValue("✅  " + label + " ready!  (generated " + new Date().toLocaleTimeString() + ")")
+    .setBackground("#b6d7a8").setFontColor("#274e13").setFontWeight("bold");
 }
 
 // ── 1. SYSTEM BUILDER ─────────────────────────────────────────
@@ -114,7 +152,7 @@ function fullInitialize() {
   sched.setColumnWidth(8, 120);
   // Type column — reference only, not used by report logic
   const typeRule = SpreadsheetApp.newDataValidation()
-    .requireValueInList(['Dual Meet', 'Invitational', 'Championship', 'Scrimmage'])
+    .requireValueInList(['', 'Dual Meet', 'Invitational', 'Championship', 'Time Trials', 'Relays', '8th Grade Pentathlon', 'Scrimmage'])
     .setAllowInvalid(true).build();
   sched.getRange("D2:D50").setDataValidation(typeRule);
 
@@ -132,7 +170,8 @@ function fullInitialize() {
   entry.getRange("A2:A2000").setDataValidation(meetRule);
   entry.getRange("B2:B2000").setDataValidation(genderRule);
   entry.getRange("C2:C2000").setDataValidation(eventRule);
-  if (!entry.getFilter()) entry.getRange("A1:I1").createFilter();
+  if (entry.getFilter()) entry.getFilter().remove();
+  entry.getRange("A1:I2000").createFilter();
 
   entry.setColumnWidth(1, 70);
   entry.setColumnWidth(2, 70);
@@ -173,8 +212,8 @@ function fullInitialize() {
 
   const home = getOrCreateSheet(ss, 'Home');
   home.clear();
-  home.setColumnWidth(1, 36);
-  home.setColumnWidth(2, 260);
+  home.setColumnWidth(1, 72);
+  home.setColumnWidth(2, 480);
   // Header
   home.getRange("A1:B1").merge()
     .setValue("🏁 FINISH LINE " + VERSION)
@@ -184,9 +223,9 @@ function fullInitialize() {
   home.setRowHeight(1, 48);
   // Selection dropdowns
   home.getRange("A3").setValue("Meet #:").setFontWeight("bold");
-  home.getRange("B3").setBackground("#fff2cc").setDataValidation(meetValRule);
+  home.getRange("B3").setBackground("#fff2cc").setDataValidation(meetValRule).setHorizontalAlignment("left");
   home.getRange("A4").setValue("Gender:").setFontWeight("bold");
-  home.getRange("B4").setBackground("#fff2cc").setDataValidation(genderValRule);
+  home.getRange("B4").setBackground("#fff2cc").setDataValidation(genderValRule).setHorizontalAlignment("left");
   // Button rows — checkbox in col A, label in col B
   const btnStyle = (rng, label, bg) => {
     rng.getSheet().getRange(rng.getRow(), 1).insertCheckboxes();
@@ -198,14 +237,68 @@ function fullInitialize() {
   };
   btnStyle(home.getRange("B6"), "  ▶  Generate Printable Lineup",      "#38761d");
   btnStyle(home.getRange("B7"), "  ▶  Generate Printable Event Forms", "#1c4587");
+  // Row 5: delay hint — static text, always visible near the buttons
+  home.getRange("A5:B5").merge()
+    .setValue("ℹ️  After clicking, wait 5–15 sec for status to appear below.")
+    .setFontSize(8).setFontStyle("italic").setFontColor("#666666");
+  home.setRowHeight(5, 16);
+  // Row 8: status cell — written to by onEditInstallable to show progress/errors
+  home.getRange("A8:B8").merge()
+    .setValue("")
+    .setBackground(null).setFontWeight("normal");
+  home.setRowHeight(8, 28);
   home.getRange("A9:B9").merge()
     .setValue("── Future Features ───────────────────────────")
     .setFontStyle("italic").setFontColor("#aaaaaa").setFontSize(9);
+
+  // ── SETUP CHECKLIST ──
+  // Visible reminder for first-time setup and when copying to a new season.
+  home.setRowHeight(11, 28);
+  home.getRange("A11:B11").merge()
+    .setValue("📋  SETUP CHECKLIST")
+    .setBackground("#444444").setFontColor("white")
+    .setFontWeight("bold").setFontSize(10)
+    .setHorizontalAlignment("left").setVerticalAlignment("middle")
+    .setPaddingTop ? null : null; // padding not available in GAS — just style
+
+  const checks = [
+    ["☐", "Add meets to the Schedule tab (Meet #, Date, Meet Name)"],
+    ["☐", "Add athletes to the Roster tab (Athlete Name + Display Name)"],
+    ["☐", "Add school records to School_Records tab (optional)"],
+    ["☐", "Enter results in Data_Entry after each meet"],
+    ["⚠️", "TRIGGER SETUP (once per spreadsheet copy):"],
+    ["",   "  Extensions → Apps Script → Triggers (clock icon)"],
+    ["",   "  + Add Trigger: onEditInstallable | Spreadsheet | On edit"],
+    ["",   "  This enables live status updates on the Home tab buttons."],
+    ["ℹ️", "NORMAL: Expect a 5–15 sec delay after clicking a button."],
+    ["",   "  Google must spin up a script environment before running."],
+    ["",   "  The yellow ⏳ status above will appear once it starts."],
+  ];
+  checks.forEach(([icon, text], idx) => {
+    const r = 12 + idx;
+    home.getRange(r, 1).setValue(icon).setHorizontalAlignment("center").setFontSize(9);
+    home.getRange(r, 2).setValue(text).setFontSize(9)
+      .setFontColor(icon === "⚠️" ? "#990000" : "#333333")
+      .setFontWeight(icon === "⚠️" ? "bold" : "normal");
+    home.setRowHeight(r, 18);
+  });
+
+  // ── TAB COLORS ──
+  // Home: black. Data tabs: vivid cyan. Output tabs: vivid orange.
+  // Using high-saturation colors because Google Sheets tab chips are tiny.
+  ss.getSheetByName('Home')             && ss.getSheetByName('Home').setTabColor('#000000');
+  ss.getSheetByName('Schedule')         && ss.getSheetByName('Schedule').setTabColor('#00bcd4');
+  ss.getSheetByName('Data_Entry')       && ss.getSheetByName('Data_Entry').setTabColor('#00bcd4');
+  ss.getSheetByName('Roster')           && ss.getSheetByName('Roster').setTabColor('#00bcd4');
+  ss.getSheetByName('School_Records')   && ss.getSheetByName('School_Records').setTabColor('#00bcd4');
+  ss.getSheetByName('Lineup_View')      && ss.getSheetByName('Lineup_View').setTabColor('#ff6d00');
+  ss.getSheetByName('Event_Form_Printable') && ss.getSheetByName('Event_Form_Printable').setTabColor('#ff6d00');
 
   // ── PRINTABLE TABS ── (pure output — selection is on Home tab)
   ['Lineup_View', 'Event_Form_Printable'].forEach(name => {
     const sh = getOrCreateSheet(ss, name);
     sh.clear();
+    sh.getRange(1, 1, sh.getMaxRows(), 9).clearNote();
   });
 
   ui.alert('✅ FINISH LINE ' + VERSION + ' — System built successfully!\n\nNext steps:\n1. Add meets to the Schedule tab\n2. Add athletes to the Roster tab\n3. Enter results in Data_Entry\n4. Use the menu to generate printable reports');
@@ -232,7 +325,7 @@ function generateLineupReport() {
   const meetName   = (meetRow?.[5] || "MEET").toUpperCase();
 
   sheet.clear();
-  sheet.clearRowBreaks();
+  sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
   applyReportLayout(sheet);
 
   // Title row
@@ -251,10 +344,11 @@ function generateLineupReport() {
   const HALF_TRACK  = 5; // first half in left column
 
   PRINT_EVT.forEach((ev, i) => {
-    // At the transition to field events, insert a page break to push them to page 2
+    // At the transition to field events, sync both columns to the same row
+    // so field events start aligned. (Page breaks must be set manually in
+    // File → Print → page break settings — GAS has no API for this.)
     if (i === TRACK_COUNT) {
       const syncRow = Math.max(curL, curR);
-      sheet.insertRowBreak(syncRow);
       curL = syncRow;
       curR = syncRow;
     }
@@ -271,7 +365,7 @@ function generateLineupReport() {
     sheet.getRange(row, col, 1, 2)
       .setValues([[ev.toUpperCase(), "PR"]])
       .setBackground("#000000").setFontColor("white").setFontWeight("bold")
-      .setBorder(true, true, true, true, null, null);
+      .setBorder(true, true, true, true, true, null);
     row++;
 
     if (isRelayEvent(ev)) {
@@ -282,19 +376,19 @@ function generateLineupReport() {
           sheet.getRange(row, col, 1, 2)
             .setValues([["", ""]])
             .setBackground("#dddddd")
-            .setBorder(true, true, true, true, null, null);
+            .setBorder(true, true, true, true, true, null);
           row++;
         }
         // Team header — dark to distinguish from athlete rows
         sheet.getRange(row, col, 1, 2)
           .setValues([["\u25b8 TEAM " + tId, "LEG SPLIT"]])
           .setBackground("#444444").setFontColor("white").setFontWeight("bold")
-          .setBorder(true, true, true, true, null, null);
+          .setBorder(true, true, true, true, true, null);
         row++;
         aths.filter(a => a[4] == tId).forEach((m, idx) => {
           sheet.getRange(row, col, 1, 2)
             .setValues([["  " + (idx + 1) + ". " + m[3], m[6] || ""]])
-            .setBorder(true, true, true, true, null, null);
+            .setBorder(true, true, true, true, true, null);
           row++;
         });
       });
@@ -304,7 +398,7 @@ function generateLineupReport() {
         const prDisplay = (pr && pr !== "-") ? pr : "—";
         sheet.getRange(row, col, 1, 2)
           .setValues([[a[3], prDisplay]])
-          .setBorder(true, true, true, true, null, null);
+          .setBorder(true, true, true, true, true, null);
         if (pr && pr !== "-") {
           sheet.getRange(row, col + 1).setFontColor("#1155cc");
         } else {
@@ -320,7 +414,7 @@ function generateLineupReport() {
     while (row < minRow) {
       sheet.getRange(row, col, 1, 2)
         .setValues([["", ""]])
-        .setBorder(true, true, true, true, null, null);
+        .setBorder(true, true, true, true, true, null);
       row++;
     }
 
@@ -349,7 +443,14 @@ function generateEventFormReport() {
 
   const meetRow  = schedData.find(r => r[0] == meetNum);
   if (!meetRow) {
-    SpreadsheetApp.getUi().alert("Meet #" + meetNum + " not found in Schedule.");
+    try {
+      SpreadsheetApp.getUi().alert("Meet #" + meetNum + " not found in Schedule.");
+    } catch(err) {
+      SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Home')
+        .getRange("A8:B8").merge()
+        .setValue("❌  Meet #" + meetNum + " not found in Schedule.")
+        .setBackground("#ea9999").setFontColor("#990000").setFontWeight("bold");
+    }
     return;
   }
 
@@ -358,7 +459,7 @@ function generateEventFormReport() {
   const standingStr = standing ? " | STANDING: " + standing : "";
 
   sheet.clear();
-  sheet.clearRowBreaks();
+  sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
   applyReportLayout(sheet);
 
   // Title row
@@ -376,10 +477,11 @@ function generateEventFormReport() {
   const TRACK_COUNT = 9; // PRINT_EVT indices 0–8 are track
   const HALF_TRACK  = 5; // first half in left column
   PRINT_EVT.forEach((ev, i) => {
-    // At the transition to field events, insert a page break to push them to page 2
+    // At the transition to field events, sync both columns to the same row
+    // so field events start aligned. (Page breaks must be set manually in
+    // File → Print → page break settings — GAS has no API for this.)
     if (i === TRACK_COUNT) {
       const syncRow = Math.max(curL, curR);
-      sheet.insertRowBreak(syncRow);
       curL = syncRow;
       curR = syncRow;
     }
@@ -395,9 +497,9 @@ function generateEventFormReport() {
 
     // Event header
     sheet.getRange(row, col, 1, 2)
-      .setValues([[ev.toUpperCase(), "Rec: " + (schoolRec || "____")]])
+      .setValues([[ev.toUpperCase(), "Rec: " + (schoolRec || "")]])
       .setBackground("#444444").setFontColor("white").setFontWeight("bold")
-      .setBorder(true, true, true, true, null, null);
+      .setBorder(true, true, true, true, true, null);
     // Highlight the Rec: cell in amber when a school record exists
     if (schoolRec) {
       sheet.getRange(row, col + 1)
@@ -420,7 +522,7 @@ function generateEventFormReport() {
     while (row < minRow) {
       sheet.getRange(row, col, 1, 2)
         .setValues([["", ""]])
-        .setBorder(true, true, true, true, null, null);
+        .setBorder(true, true, true, true, true, null);
       row++;
     }
 
@@ -454,10 +556,10 @@ function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
       nameCell.setValue(nameText);
     }
     resultCell.setValue(res + plTag);
-    rowRange.setBorder(true, true, true, true, null, null);
+    rowRange.setBorder(true, true, true, true, true, null);
 
     // Highlight result cell and name cell
-    if (res) {
+    if (res && !isNoMark(res)) {
       if (schoolRec && isBetter(res, schoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
@@ -478,8 +580,8 @@ function renderRelayBlock(sheet, aths, row, col, schoolRec, ev) {
     const members = aths.filter(a => a[4] == tId);
     members.forEach((m, idx) => {
       sheet.getRange(row, col, 1, 2)
-        .setValues([[(idx + 1) + ". " + m[3], "Split: " + (formatCellValue(m[6]) || "____")]])
-        .setBorder(true, true, true, true, null, null);
+        .setValues([[(idx + 1) + ". " + m[3], formatCellValue(m[6]) || ""]])
+        .setBorder(true, true, true, true, true, null);
       row++;
     });
     // Team total row
@@ -490,8 +592,8 @@ function renderRelayBlock(sheet, aths, row, col, schoolRec, ev) {
     const totalRange = sheet.getRange(row, col, 1, 2);
     totalRange.setValues([["TEAM " + tId + " TOTAL", res + plTag]])
       .setBackground("#eeeeee").setFontWeight("bold")
-      .setBorder(true, true, true, true, null, null);
-    if (res && schoolRec && isBetter(res, schoolRec, ev)) {
+      .setBorder(true, true, true, true, true, null);
+    if (res && !isNoMark(res) && schoolRec && isBetter(res, schoolRec, ev)) {
       totalRange.setBackground("#ffe599");
       sheet.getRange(row, col + 1).setNote("🏆 School Record!");
     }
@@ -531,9 +633,9 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
       nameCell.setValue(nameText);
     }
     resultCell.setValue(res + plTag);
-    rowRange.setBorder(true, true, true, true, null, null).setFontWeight("bold");
+    rowRange.setBorder(true, true, true, true, true, null).setFontWeight("bold");
 
-    if (res) {
+    if (res && !isNoMark(res)) {
       if (schoolRec && isBetter(res, schoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
@@ -547,9 +649,9 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     // Split sub-rows
     for (let l = 0; l < lapCount; l++) {
       sheet.getRange(row, col, 1, 2)
-        .setValues([["   ↳ " + lapLabels[l], splits[l] || "____"]])
+        .setValues([["   ↳ " + lapLabels[l], splits[l] || ""]])
         .setFontSize(8).setFontStyle("italic").setFontColor("#555555")
-        .setBorder(true, true, true, true, null, null);
+        .setBorder(true, true, true, true, true, null);
       row++;
     }
   });
@@ -582,9 +684,9 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
       nameCell.setValue(nameText);
     }
     resultCell.setValue(res + plTag);
-    rowRange.setBorder(true, true, true, true, null, null).setFontWeight("bold");
+    rowRange.setBorder(true, true, true, true, true, null).setFontWeight("bold");
 
-    if (res) {
+    if (res && !isNoMark(res)) {
       if (schoolRec && isBetter(res, schoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
@@ -598,9 +700,9 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     // Attempt sub-rows
     for (let att = 0; att < 3; att++) {
       sheet.getRange(row, col, 1, 2)
-        .setValues([["   ↳ Attempt " + (att + 1), attempts[att] || "____"]])
+        .setValues([["   ↳ Attempt " + (att + 1), attempts[att] || ""]])
         .setFontSize(8).setFontStyle("italic").setFontColor("#555555")
-        .setBorder(true, true, true, true, null, null);
+        .setBorder(true, true, true, true, true, null);
       row++;
     }
   });
@@ -608,6 +710,16 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
 }
 
 // ── UTILITY FUNCTIONS ─────────────────────────────────────────
+
+/**
+ * Returns true if a result value is a no-mark / non-participation indicator.
+ * These should never trigger PR or school-record highlights.
+ * Covers: - / DNR / DNS / DQ / NH (no height) / NM (no mark) / ND / Scratch / X
+ */
+function isNoMark(val) {
+  if (!val) return false;
+  return /^(-|dnr|dns|dq|nh|nm|nd|scratch|x)$/i.test(val.toString().trim());
+}
 
 function isRelayEvent(ev) {
   return RELAY_EVTS.some(r => ev === r) || ev.includes("Relay");
@@ -683,6 +795,81 @@ function checkPRSetup() {
     SpreadsheetApp.getUi().alert('✅ PR Setup looks good! All Data_Entry names match a Roster entry.');
   } else {
     SpreadsheetApp.getUi().alert('PR Setup Issues Found:\n\n' + issues.join('\n'));
+  }
+}
+
+/**
+ * Checks all athlete names entered in Data_Entry for a specific meet
+ * against the Roster, reporting any names that don't match.
+ *
+ * Uses Home B3 (Meet #) and B4 (Gender) as defaults; prompts if blank.
+ * Run from the 🏁 FINISH LINE menu → "Check Meet Roster".
+ */
+function checkMeetRoster() {
+  const ss         = SpreadsheetApp.getActiveSpreadsheet();
+  const ui         = SpreadsheetApp.getUi();
+  const home       = ss.getSheetByName('Home');
+  const entryData  = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const rosterData = ss.getSheetByName('Roster').getDataRange().getValues();
+
+  // Use Home B3/B4 as defaults; fall back to prompting
+  let meetNum = home ? home.getRange('B3').getValue() : '';
+  let gender  = home ? home.getRange('B4').getValue() : '';
+
+  if (!meetNum) {
+    const resp = ui.prompt('Check Meet Roster', 'Enter Meet # to check:', ui.ButtonSet.OK_CANCEL);
+    if (resp.getSelectedButton() !== ui.Button.OK) return;
+    meetNum = resp.getResponseText().trim();
+    if (!meetNum) return;
+  }
+
+  // Build lookup sets from Roster
+  const rosterDisplayNames = new Set(
+    rosterData.slice(1).map(r => (r[1] || '').toString().trim().toLowerCase()).filter(Boolean)
+  );
+  const rosterFullNames = new Set(
+    rosterData.slice(1).map(r => (r[0] || '').toString().trim().toLowerCase()).filter(Boolean)
+  );
+
+  // Filter Data_Entry rows for this meet (optionally by gender)
+  const meetRows = entryData.slice(1).filter(r => {
+    if (r[0] == meetNum && r[3]) {
+      return gender ? r[1] == gender : true;
+    }
+    return false;
+  });
+
+  if (meetRows.length === 0) {
+    ui.alert('No entries found for Meet #' + meetNum + (gender ? ' / ' + gender : '') + '.');
+    return;
+  }
+
+  const issues = [];
+  const seen   = new Set();
+
+  meetRows.forEach(r => {
+    const raw  = r[3].toString().trim();
+    const key  = raw.toLowerCase();
+    const ev   = r[2] || '?';
+    if (seen.has(key)) return; // only report each name once
+    seen.add(key);
+    const matched = rosterDisplayNames.has(key) || rosterFullNames.has(key);
+    if (!matched) {
+      issues.push('❌ "' + raw + '"  (first seen in: ' + ev + ')');
+    }
+  });
+
+  const scope = 'Meet #' + meetNum + (gender ? ' / ' + gender : ' / all genders');
+  if (issues.length === 0) {
+    ui.alert('✅ All ' + seen.size + ' athlete names in ' + scope + ' match the Roster.');
+  } else {
+    ui.alert(
+      '⚠️ ' + issues.length + ' unmatched name(s) in ' + scope + 
+      ' (' + seen.size + ' unique athletes checked):\n\n' +
+      issues.join('\n') +
+      '\n\nFix: update the name in Data_Entry to exactly match the ' +
+      'Display Name (or Athlete Name) in the Roster tab.'
+    );
   }
 }
 
