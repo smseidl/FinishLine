@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.11";
+const VERSION = "v2.12";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -138,8 +138,8 @@ function fullInitialize() {
 
   // ── SCHEDULE ──
   const sched = getOrCreateSheet(ss, 'Schedule');
-  sched.getRange(1, 1, 1, 8)
-    .setValues([["Meet #", "Date", "Time", "Type", "Location", "Meet Name", "Boys Standing", "Girls Standing"]])
+  sched.getRange(1, 1, 1, 9)
+    .setValues([["Meet #", "Date", "Time", "Type", "Location", "Address", "Meet Name", "Boys Standing", "Girls Standing"]])
     .setBackground("#444444").setFontColor("white").setFontWeight("bold");
   sched.setFrozenRows(1);
   sched.setColumnWidth(1, 70);
@@ -147,9 +147,10 @@ function fullInitialize() {
   sched.setColumnWidth(3, 80);
   sched.setColumnWidth(4, 100);
   sched.setColumnWidth(5, 180);
-  sched.setColumnWidth(6, 180);
-  sched.setColumnWidth(7, 120);
+  sched.setColumnWidth(6, 200);
+  sched.setColumnWidth(7, 180);
   sched.setColumnWidth(8, 120);
+  sched.setColumnWidth(9, 120);
   // Type column — reference only, not used by report logic
   const typeRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['', 'Dual Meet', 'Invitational', 'Championship', 'Time Trials', 'Relays', '8th Grade Pentathlon', 'Scrimmage'])
@@ -322,7 +323,7 @@ function generateLineupReport() {
   const entryData  = ss.getSheetByName("Data_Entry").getDataRange().getValues();
   const rosterData = ss.getSheetByName("Roster").getDataRange().getValues();
   const meetRow    = schedData.find(r => r[0] == meetNum);
-  const meetName   = (meetRow?.[5] || "MEET").toUpperCase();
+  const meetName   = (meetRow?.[6] || "MEET").toUpperCase();
 
   sheet.clear();
   sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
@@ -454,8 +455,8 @@ function generateEventFormReport() {
     return;
   }
 
-  const meetName    = (meetRow[5] || "MEET").toUpperCase();
-  const standing    = (gender === "Boys") ? meetRow[6] : meetRow[7];
+  const meetName    = (meetRow[6] || "MEET").toUpperCase();
+  const standing    = (gender === "Boys") ? meetRow[7] : meetRow[8];
   const standingStr = standing ? " | STANDING: " + standing : "";
 
   sheet.clear();
