@@ -9,6 +9,7 @@ It lives entirely in a single file: `scripts/FinishLine.gs`, pasted into a Googl
 The script generates two printable reports from spreadsheet data:
 - **Lineup_View** — pre-meet athlete lineup with PRs
 - **Event_Form_Printable** — post-meet event forms with results, PR/record highlights
+- **PR Update Tool** — automatically updates Roster PRs from meet results with preview confirmation
 
 ---
 
@@ -97,10 +98,11 @@ README.md               ← coach-facing setup guide
 | Function | Description |
 |----------|-------------|
 | `onOpen()` | Builds the 🏁 FINISH LINE menu |
-| `onEditInstallable(e)` | Handles Home tab checkbox buttons; writes status to A8:B8 |
+| `onEditInstallable(e)` | Handles Home tab checkbox buttons (rows 6/7/8); writes status to A9:B9 |
 | `fullInitialize()` | Builds/rebuilds all 6 tabs, headers, validations, tab colors |
 | `generateLineupReport()` | Writes Lineup_View for a selected meet/gender |
 | `generateEventFormReport()` | Writes Event_Form_Printable for a selected meet/gender |
+| `findAndUpdatePRs()` | Scans meet results, shows preview dialog, updates Roster PRs for improvements |
 | `renderStandardBlock()` | Renders a standard track event block |
 | `renderRelayBlock()` | Renders a relay event block (grouped by team ID) |
 | `renderSplitBlock()` | Renders 800M/1600M with lap sub-rows |
@@ -173,9 +175,38 @@ RELAY_EVTS   = ["400 M Relay", "800 M Relay", ...]    // grouped by Relay Team I
 | 5 | Delay hint text (italic, small) |
 | 6 | Lineup button (green, checkbox in A6) |
 | 7 | Event Forms button (blue, checkbox in A7) |
-| 8 | Status cell A8:B8 (merged; written by onEditInstallable) |
-| 9 | Future Features stub |
-| 11–22 | Setup Checklist |
+| 8 | Update PRs button (amber, checkbox in A8) |
+| 9 | Status cell A9:B9 (merged; written by onEditInstallable) |
+| 10 | Future Features stub |
+| 12–23 | Setup Checklist |
+
+---
+
+## PR Update Workflow
+
+The **Update PRs from This Meet** button (row 8, amber) automatically updates athlete PRs in the Roster tab:
+
+1. Uses Meet # (B3) and Gender (B4) from Home tab
+2. Scans Data_Entry for all individual results (excludes relays and no-marks)
+3. Compares each result to current Roster PR using `isBetter()` logic
+4. Shows confirmation dialog with preview of all PRs to update (up to 20 shown, with count for remaining)
+5. On confirmation, writes new PRs directly to Roster tab
+6. Shows completion message with count of PRs updated
+
+**Error Handling:**
+- If athlete name not found in Roster → stops with error, lists all unmatched names
+- If event column not found in Roster → stops with error
+- If no PRs to update → shows info message
+
+**What counts as a PR:**
+- Current Roster value is blank, null, or "-" (first time for this event)
+- Result is better than current PR using `isBetter()` logic (field events = bigger, track events = smaller)
+
+**Preview Dialog Format:**
+```
+Name | Event: old PR → new PR
+...
+```
 
 ---
 
