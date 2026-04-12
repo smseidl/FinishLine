@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.16";
+const VERSION = "v2.18";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -53,6 +53,10 @@ const SPLIT_EVTS   = ["800 M Run", "1600 M Run"];
 const ATTEMPT_EVTS = ["Shot Put", "Discus", "Long Jump"];
 const RELAY_EVTS   = ["400 M Relay", "800 M Relay", "1600 M Relay",
                       "Hurdle Shuttle", "Sprint Relay", "Special Relay", "Distance Relay"];
+
+// Page layout for Event Forms — adjust based on your printer/margin settings
+// Typical: 45-50 rows per page. Increase if using narrow margins, decrease for wide margins.
+const PAGE_HEIGHT = 45;
 
 // ── MENU ─────────────────────────────────────────────────────
 
@@ -381,6 +385,19 @@ function generateLineupReport() {
   const meetRow    = schedData.find(r => r[0] == meetNum);
   const meetName   = (meetRow?.[6] || "MEET").toUpperCase();
 
+  // Validate that all athlete names exist in Roster
+  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, gender);
+  if (unmatchedNames.length > 0) {
+    SpreadsheetApp.getUi().alert(
+      '❌ Athletes Not Found in Roster',
+      'The following athletes from Data_Entry were not found in the Roster:\n\n' +
+      unmatchedNames.join('\n') + '\n\n' +
+      'Please add them to the Roster tab first (using the exact Display Name), then regenerate.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
+
   // Check for athletes with >4 events
   const overLimit = checkAthleteEventCount(entryData, meetNum, gender);
   if (overLimit.length > 0) {
@@ -401,6 +418,8 @@ function generateLineupReport() {
 
   sheet.clear();
   sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
+  // Reset all row heights to default
+  sheet.setRowHeights(1, sheet.getMaxRows(), 21);
   applyReportLayout(sheet);
 
   // Title row
@@ -538,28 +557,105 @@ function generateLineupReport() {
   // Sort athletes alphabetically
   const sortedAthletes = Object.keys(athleteEvents).sort();
   
-  // Simple format: one row per athlete with merged event columns
-  let athRow = byAthleteStart + 2;
-  
-  sortedAthletes.forEach(athName => {
-    const events = athleteEvents[athName];
-    const eventsList = events.join(", ");
+  // Batch write all athlete data for performance
+  if (sortedAthletes.length > 0) {
+    const athDataStart = byAthleteStart + 2;
     
-    sheet.getRange(athRow, 1)
-      .setValue(athName)
+    // Build all values at once
+    const athValues = sortedAthletes.map(athName => {
+      const events = athleteEvents[athName];
+      const eventsList = events.join(", ");
+      return [athName, eventsList, '', '', ''];
+    });
+    
+    // Write all values in one call
+    sheet.getRange(athDataStart, 1, sortedAthletes.length, 5).setValues(athValues);
+    
+    // Apply formatting to ranges (much faster than row-by-row)
+    sheet.getRange(athDataStart, 1, sortedAthletes.length, 1)
       .setFontWeight("bold")
       .setFontSize(13);
     
-    sheet.getRange(athRow, 2, 1, 4).merge()
-      .setValue(eventsList)
+    // Merge columns 2-5 for event lists and apply formatting
+    for (let i = 0; i < sortedAthletes.length; i++) {
+      sheet.getRange(athDataStart + i, 2, 1, 4).merge();
+    }
+    
+    sheet.getRange(athDataStart, 2, sortedAthletes.length, 4)
       .setFontSize(13)
       .setWrap(true);
     
-    sheet.getRange(athRow, 1, 1, 5)
+    sheet.getRange(athDataStart, 1, sortedAthletes.length, 5)
       .setBorder(true, true, true, true, false, null);
+  }
+  
+  const athRow = byAthleteStart + 2 + sortedAthletes.length;
+
+  // ── CONFERENCE ROSTER ─────────────────────────────────────────
+  // Simple alphabetical list of all participants for conference submission
+  // Positioned at end since it's never printed — only used for digital submission
+  const confRosterStart = athRow + 3;
+  
+  // Title row
+  sheet.getRange(confRosterStart, 1, 1, 5).merge()
+    .setValue(meetName + " — CONFERENCE ROSTER (" + gender + ")")
+    .setFontWeight("bold").setFontSize(16)
+    .setHorizontalAlignment("center").setVerticalAlignment("middle")
+    .setBackground("#1c4587").setFontColor("white");
+  sheet.setRowHeight(confRosterStart, 36);
+  
+  // Collect unique athlete names from Data_Entry
+  const uniqueDisplayNames = [...new Set(
+    entryData
+      .filter(r => r[0] == meetNum && r[1] == gender && r[3])
+      .map(r => r[3].toString().trim())
+  )];
+  
+  // Look up roster info: Display Name (col B) + last name from Athlete Name (col A)
+  const conferenceNames = [];
+  uniqueDisplayNames.forEach(displayName => {
+    const nameL = displayName.toLowerCase();
+    const rosterRow = rosterData.slice(1).find(r => {
+      const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
+      const rosterFull = (r[0] || '').toString().trim().toLowerCase();
+      return rosterDisplay === nameL || rosterFull === nameL;
+    });
     
-    athRow++;
+    if (rosterRow) {
+      // Use Display Name (col B) for first name, extract last name from Athlete Name (col A)
+      const displayNameUse = (rosterRow[1] || displayName).toString().trim();
+      const fullName = (rosterRow[0] || '').toString().trim();
+      const nameParts = fullName.split(/\s+/);
+      const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+      
+      conferenceNames.push({
+        displayName: displayNameUse,
+        lastName: lastName
+      });
+    } else {
+      // Fallback: use Data_Entry name as-is
+      const parts = displayName.split(/\s+/);
+      conferenceNames.push({
+        displayName: parts.slice(0, -1).join(' ') || parts[0],
+        lastName: parts[parts.length - 1] || ''
+      });
+    }
   });
+  
+  // Format names: "DisplayName L" or "DisplayName LastName" if duplicates
+  const formattedNames = formatConferenceNamesFromParts(conferenceNames);
+  
+  // Batch write all names at once for performance
+  if (formattedNames.length > 0) {
+    const confDataStart = confRosterStart + 2;
+    const confValues = formattedNames.map(name => [name]);
+    sheet.getRange(confDataStart, 1, formattedNames.length, 1).setValues(confValues);
+    
+    // Apply formatting
+    sheet.getRange(confDataStart, 1, formattedNames.length, 1)
+      .setFontSize(11)
+      .setBorder(true, true, true, true, false, null);
+  }
 }
 
 // ── 3. EVENT FORM REPORT ──────────────────────────────────────
@@ -580,6 +676,19 @@ function generateEventFormReport() {
   const entryData   = ss.getSheetByName("Data_Entry").getDataRange().getValues();
   const recordsData = ss.getSheetByName("School_Records").getDataRange().getValues();
   const rosterData  = ss.getSheetByName("Roster").getDataRange().getValues();
+
+  // Validate that all athlete names exist in Roster
+  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, gender);
+  if (unmatchedNames.length > 0) {
+    SpreadsheetApp.getUi().alert(
+      '❌ Athletes Not Found in Roster',
+      'The following athletes from Data_Entry were not found in the Roster:\n\n' +
+      unmatchedNames.join('\n') + '\n\n' +
+      'Please add them to the Roster tab first (using the exact Display Name), then regenerate.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
 
   // Check for athletes with >4 events
   const overLimit = checkAthleteEventCount(entryData, meetNum, gender);
@@ -618,6 +727,8 @@ function generateEventFormReport() {
 
   sheet.clear();
   sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
+  // Reset all row heights to default
+  sheet.setRowHeights(1, sheet.getMaxRows(), 21);
   applyReportLayout(sheet);
 
   // Title row
@@ -683,20 +794,9 @@ function generateEventFormReport() {
       row = renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     }
 
-    // Pad to minimum 6 data rows
-    const minRow = startRow + 6;
-    while (row < minRow) {
-      sheet.getRange(row, col, 1, 2)
-        .setValues([["", ""]])
-        .setBorder(true, true, true, true, true, null);
-      row++;
-    }
-
     // Add blank rows for at-meet additions (write-ins)
-    // Smart sizing: 1 line if empty, 4 lines for relays, 3 lines otherwise
-    const additionCount = (aths.length === 0) ? 1
-                        : isRelayEvent(ev) ? 4
-                        : 3;
+    // 4 lines for relays, 2 lines for all other events
+    const additionCount = isRelayEvent(ev) ? 4 : 2;
     
     sheet.getRange(row, col, 1, 2)
       .setValues([["─ At-Meet Additions ─", ""]])
@@ -899,13 +999,101 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
 // ── UTILITY FUNCTIONS ─────────────────────────────────────────
 
 /**
+ * Format athlete names for conference roster using Display Name + Last Name.
+ * - Input: array of {displayName, lastName} objects
+ * - Default format: "DisplayName L" (display name + last initial)
+ * - If multiple athletes have the same "DisplayName L", expand all to full last name
+ * - Returns array sorted alphabetically by display name
+ * - Handles cases like "MJ Smith" → "MJ S" or "Mary Jane Smith" (goes by MJ) → "MJ S"
+ */
+function formatConferenceNamesFromParts(nameParts) {
+  const parsed = nameParts.map(np => {
+    const lastInitial = np.lastName.charAt(0).toUpperCase();
+    const shortForm = np.displayName + ' ' + lastInitial;
+    
+    return {
+      displayName: np.displayName,
+      lastName: np.lastName,
+      lastInitial: lastInitial,
+      shortForm: shortForm
+    };
+  });
+  
+  // Find duplicates (same shortForm)
+  const shortFormCounts = {};
+  parsed.forEach(p => { 
+    shortFormCounts[p.shortForm] = (shortFormCounts[p.shortForm] || 0) + 1;
+  });
+  
+  // Format: use full last name if duplicate, otherwise use short form
+  const formatted = parsed.map(p => {
+    if (shortFormCounts[p.shortForm] > 1) {
+      return p.displayName + ' ' + p.lastName;
+    }
+    return p.shortForm;
+  });
+  
+  // Sort alphabetically by display name
+  return formatted.sort((a, b) => {
+    return a.toLowerCase().localeCompare(b.toLowerCase());
+  });
+}
+
+/**
+ * Format athlete names for conference roster.
+ * - Default format: "First L" (first name + last initial)
+ * - If multiple athletes have the same "First L", expand all to full last name
+ * - Returns array sorted alphabetically by first name
+ * - Handles multi-word first names (e.g., "Mary Jane Smith" → "Mary Jane S")
+ */
+function formatConferenceNames(athleteNames) {
+  const parsed = athleteNames.map(name => {
+    const parts = name.trim().split(/\s+/);
+    
+    // Last word is the last name, everything else is the first name
+    const lastName = parts.length > 1 ? parts[parts.length - 1] : '';
+    const firstName = parts.length > 1 ? parts.slice(0, -1).join(' ') : parts[0] || '';
+    const lastInitial = lastName.charAt(0).toUpperCase();
+    
+    return {
+      original: name,
+      firstName: firstName,
+      lastName: lastName,
+      lastInitial: lastInitial,
+      shortForm: firstName + ' ' + lastInitial
+    };
+  });
+  
+  // Find duplicates (same shortForm)
+  const shortFormCounts = {};
+  parsed.forEach(p => {
+    shortFormCounts[p.shortForm] = (shortFormCounts[p.shortForm] || 0) + 1;
+  });
+  
+  // Format: use full last name if duplicate, otherwise use short form
+  const formatted = parsed.map(p => {
+    if (shortFormCounts[p.shortForm] > 1) {
+      return p.firstName + ' ' + p.lastName;
+    }
+    return p.shortForm;
+  });
+  
+  // Sort alphabetically by first name
+  return formatted.sort((a, b) => {
+    const aFirst = a.split(' ')[0].toLowerCase();
+    const bFirst = b.split(' ')[0].toLowerCase();
+    return aFirst.localeCompare(bFirst);
+  });
+}
+
+/**
  * Returns true if a result value is a no-mark / non-participation indicator.
  * These should never trigger PR or school-record highlights.
- * Covers: - / DNR / DNS / DQ / NH (no height) / NM (no mark) / ND / Scratch / X
+ * Covers: - / DNR / DNS / DQ / NH (no height) / NM (no mark) / ND / Scratch / X / NA / CANCELED / CANCELLED
  */
 function isNoMark(val) {
   if (!val) return false;
-  return /^(-|dnr|dns|dq|nh|nm|nd|scratch|x)$/i.test(val.toString().trim());
+  return /^(-|dnr|dns|dq|nh|nm|nd|scratch|x|na|cancell?ed)$/i.test(val.toString().trim());
 }
 
 function isRelayEvent(ev) {
@@ -986,6 +1174,42 @@ function checkPRSetup() {
 }
 
 /**
+ * Validate that all athlete names in Data_Entry exist in the Roster.
+ * Similar to checkMeetRoster(), but with additional filtering
+ * Returns array of unmatched name strings.
+ */
+function validateRosterNames(entryData, rosterData, meetNum, gender) {
+  const rosterDisplayNames = new Set(
+    rosterData.slice(1).map(r => (r[1] || '').toString().trim().toLowerCase()).filter(Boolean)
+  );
+  const rosterFullNames = new Set(
+    rosterData.slice(1).map(r => (r[0] || '').toString().trim().toLowerCase()).filter(Boolean)
+  );
+
+  const meetRows = entryData.slice(1).filter(r => {
+    if (r[0] == meetNum && r[1] == gender && r[3]) return true;
+    return false;
+  });
+
+  const unmatched = [];
+  const seen = new Set();
+
+  meetRows.forEach(r => {
+    const raw = r[3].toString().trim();
+    const key = raw.toLowerCase();
+    const ev = r[2] || '?';
+    if (seen.has(key)) return; // only report each name once
+    seen.add(key);
+    const matched = rosterDisplayNames.has(key) || rosterFullNames.has(key);
+    if (!matched) {
+      unmatched.push('❌ "' + raw + '"  (in: ' + ev + ')');
+    }
+  });
+
+  return unmatched;
+}
+
+/**
  * Check if any athletes are registered for more than 4 events in a meet.
  * Returns array of {name, count, events} for athletes over the limit.
  * Note: Relays count as 1 event (not per leg).
@@ -1023,6 +1247,8 @@ function checkAthleteEventCount(entryData, meetNum, gender) {
 /**
  * Checks all athlete names entered in Data_Entry for a specific meet
  * against the Roster, reporting any names that don't match.
+ *
+ * Similar to validateRosterNames(), but less filtering.
  *
  * Uses Home B3 (Meet #) and B4 (Gender) as defaults; prompts if blank.
  * Run from the 🏁 FINISH LINE menu → "Check Meet Roster".
@@ -1151,7 +1377,7 @@ function findAndUpdatePRs() {
   const results = entryData.slice(1).filter(r => {
     if (r[0] != meetNum || r[1] != gender) return false;
     if (isRelayEvent(r[2])) return false; // skip relays (team results)
-    if (isNoMark(r[5])) return false;     // skip DNS/DNR/DQ/etc
+    if (isNoMark(r[5])) return false;     // skip DNS/DNR/DQ/CANCELLED/NA/etc
     return true;
   });
 
@@ -1230,21 +1456,35 @@ function findAndUpdatePRs() {
     return;
   }
 
-  // Show confirmation dialog
-  const previewLines = updates.slice(0, 20).map(u =>
-    u.name + ' | ' + u.event + ': ' + u.oldPR + ' → ' + u.newPR
-  );
-  const preview = previewLines.join('\n') + (updates.length > 20 ? '\n... and ' + (updates.length - 20) + ' more' : '');
-
-  const response = ui.alert(
-    '🎯 Update ' + updates.length + ' PR' + (updates.length === 1 ? '' : 's') + '?',
-    'The following PRs will be updated in the Roster tab:\n\n' + preview + '\n\nProceed?',
-    ui.ButtonSet.YES_NO
-  );
-
-  if (response !== ui.Button.YES) {
-    statusCell.setValue("⚠️ Update canceled").setBackground("#fff2cc").setFontColor("#7f6000");
-    return;
+  // Show PRs in batches to avoid truncation in alert dialogs
+  const BATCH_SIZE = 10;
+  const totalBatches = Math.ceil(updates.length / BATCH_SIZE);
+  
+  for (let batch = 0; batch < totalBatches; batch++) {
+    const start = batch * BATCH_SIZE;
+    const end = Math.min(start + BATCH_SIZE, updates.length);
+    const batchUpdates = updates.slice(start, end);
+    
+    const previewLines = batchUpdates.map(u =>
+      u.name + ' | ' + u.event + ': ' + u.oldPR + ' → ' + u.newPR
+    );
+    
+    const isLastBatch = (batch === totalBatches - 1);
+    const title = totalBatches > 1
+      ? '🎯 PRs to Update (' + (start + 1) + '-' + end + ' of ' + updates.length + ')'
+      : '🎯 Update ' + updates.length + ' PR' + (updates.length === 1 ? '' : 's') + '?';
+    
+    const message = previewLines.join('\n') + 
+      (isLastBatch ? '\n\nProceed with all ' + updates.length + ' update' + (updates.length === 1 ? '' : 's') + '?' : '');
+    
+    const buttons = isLastBatch ? ui.ButtonSet.YES_NO : ui.ButtonSet.OK_CANCEL;
+    const response = ui.alert(title, message, buttons);
+    
+    // If user cancels on any batch, abort
+    if (response === ui.Button.CANCEL || response === ui.Button.NO) {
+      statusCell.setValue("⚠️ Update canceled").setBackground("#fff2cc").setFontColor("#7f6000");
+      return;
+    }
   }
 
   // Apply updates
