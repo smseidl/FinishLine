@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.18";
+const VERSION = "v2.20";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -67,8 +67,11 @@ function onOpen() {
     .addItem('2. Generate Printable Lineup',      'generateLineupReport')
     .addItem('3. Generate Printable Event Forms', 'generateEventFormReport')
     .addSeparator()
-    .addItem('4. Check PR Setup (debug)',          'checkPRSetup')
-    .addItem('5. Check Meet Roster (debug)',         'checkMeetRoster')
+    .addItem('4. Generate Top Marks (YTD)',       'generateTopMarks')
+    .addItem('5. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
+    .addSeparator()
+    .addItem('6. Check PR Setup (debug)',          'checkPRSetup')
+    .addItem('7. Check Meet Roster (debug)',         'checkMeetRoster')
     .addToUi();
 }
 
@@ -90,25 +93,26 @@ function onEditInstallable(e) {
 
   const row = e.range.getRow();
   e.range.setValue(false); // reset immediately so it looks like a button
-  if (row !== 6 && row !== 7 && row !== 8) return;
+  if (row !== 6 && row !== 7 && row !== 8 && row !== 9) return;
 
   const home       = e.range.getSheet();
   const ss         = SpreadsheetApp.getActiveSpreadsheet();
   const meetNum    = home.getRange("B3").getValue();
   const gender     = home.getRange("B4").getValue();
-  const statusCell = home.getRange("A9:B9");
+  const statusCell = home.getRange("A10:B10");
 
   // Clear any previous status from the status cell
   statusCell.merge().setValue("").setBackground(null).setFontColor("#000000").setFontWeight("normal");
 
-  if (!meetNum || !gender) {
+  // Row 9 (athlete recaps) doesn't require meet/gender selection
+  if (row !== 9 && (!meetNum || !gender)) {
     statusCell
       .setValue("⚠️  Select a Meet # and Gender above first.")
       .setBackground("#ea9999").setFontColor("#990000").setFontWeight("bold");
     return;
   }
 
-  const label = row === 6 ? "Lineup" : row === 7 ? "Event Forms" : "Update PRs";
+  const label = row === 6 ? "Lineup" : row === 7 ? "Event Forms" : row === 8 ? "Update PRs" : "Athlete Recaps";
 
   // Show "generating" state — flush() pushes this to the browser immediately
   // when running as an installable trigger. Expect 2–5 sec startup delay before
@@ -121,6 +125,7 @@ function onEditInstallable(e) {
   if (row === 6) generateLineupReport();
   if (row === 7) generateEventFormReport();
   if (row === 8) findAndUpdatePRs();
+  if (row === 9) generateAllAthleteRecaps();
 
   // Persistent green "done" — stays visible so there's no question it finished
   statusCell
@@ -266,6 +271,33 @@ function fullInitialize() {
   records.setColumnWidth(5, 80);
   records.setColumnWidth(6, 240);
 
+  // ── HISTORICAL PRS ──
+  // Storage for past-year PRs — one row per athlete per year.
+  // Same event columns as Roster for easy copy/paste at end of season.
+  const histPR = getOrCreateSheet(ss, 'Historical_PRs');
+  const histHeaders = [["Athlete Name", "Display Name", "Year"].concat(FULL_EVT)];
+  try {
+    const currHistHeaders = histPR.getRange(1, 1, 1,histHeaders[0].length).getValues()[0];
+    const headersMatch = histHeaders[0].every((h, i) => currHistHeaders[i] === h);
+    if (!headersMatch) {
+      histPR.getRange(1, 1, 1, histHeaders[0].length).setValues(histHeaders);
+    }
+    histPR.getRange(1, 1, 1, histHeaders[0].length)
+      .setBackground("#6d9eeb").setFontColor("white").setFontWeight("bold");
+  } catch(e) {
+    if (e.message.includes('typed columns')) {
+      ui.alert('⚠️ Historical_PRs has Typed Columns enabled.\n\nFix:\n1. Select any cell in Historical_PRs\n2. Data menu → Remove column type\n3. Repeat for all columns with types\n4. Re-run "Build / Rebuild Entire System"');
+    } else {
+      ui.alert('⚠️ Error updating Historical_PRs headers:\n\n' + e.message);
+    }
+    return;
+  }
+  histPR.setFrozenRows(1);
+  histPR.setFrozenColumns(3);
+  histPR.setColumnWidth(1, 180);
+  histPR.setColumnWidth(2, 140);
+  histPR.setColumnWidth(3, 70);
+
   // ── HOME TAB ──
   const meetValRule   = SpreadsheetApp.newDataValidation().requireValueInRange(sched.getRange("A2:A50")).build();
   const genderValRule = SpreadsheetApp.newDataValidation().requireValueInList(['Girls', 'Boys']).build();
@@ -298,24 +330,25 @@ function fullInitialize() {
   btnStyle(home.getRange("B6"), "  ▶  Generate Printable Lineup",      "#38761d");
   btnStyle(home.getRange("B7"), "  ▶  Generate Printable Event Forms", "#1c4587");
   btnStyle(home.getRange("B8"), "  ▶  Update PRs from This Meet",      "#bf9000");
+  btnStyle(home.getRange("B9"), "  ▶  Generate All Athlete Recaps",    "#674ea7");
   // Row 5: delay hint — static text, always visible near the buttons
   home.getRange("A5:B5").merge()
     .setValue("ℹ️  After clicking, wait 5–15 sec for status to appear below.")
     .setFontSize(8).setFontStyle("italic").setFontColor("#666666");
   home.setRowHeight(5, 16);
-  // Row 9: status cell — written to by onEditInstallable to show progress/errors
-  home.getRange("A9:B9").merge()
+  // Row 10: status cell — written to by onEditInstallable to show progress/errors
+  home.getRange("A10:B10").merge()
     .setValue("")
     .setBackground(null).setFontWeight("normal");
-  home.setRowHeight(9, 28);
-  home.getRange("A10:B10").merge()
+  home.setRowHeight(10, 28);
+  home.getRange("A11:B11").merge()
     .setValue("── Future Features ───────────────────────────")
     .setFontStyle("italic").setFontColor("#aaaaaa").setFontSize(9);
 
   // ── SETUP CHECKLIST ──
   // Visible reminder for first-time setup and when copying to a new season.
-  home.setRowHeight(12, 28);
-  home.getRange("A12:B12").merge()
+  home.setRowHeight(13, 28);
+  home.getRange("A13:B13").merge()
     .setValue("📋  SETUP CHECKLIST")
     .setBackground("#444444").setFontColor("white")
     .setFontWeight("bold").setFontSize(10)
@@ -336,7 +369,7 @@ function fullInitialize() {
     ["",   "  The yellow ⏳ status above will appear once it starts."],
   ];
   checks.forEach(([icon, text], idx) => {
-    const r = 13 + idx;
+    const r = 14 + idx;
     home.getRange(r, 1).setValue(icon).setHorizontalAlignment("center").setFontSize(9);
     home.getRange(r, 2).setValue(text).setFontSize(9)
       .setFontColor(icon === "⚠️" ? "#990000" : "#333333")
@@ -345,18 +378,21 @@ function fullInitialize() {
   });
 
   // ── TAB COLORS ──
-  // Home: black. Data tabs: vivid cyan. Output tabs: vivid orange.
+  // Home: black. Data tabs: vivid cyan. Output tabs: vivid orange. Experimental: purple.
   // Using high-saturation colors because Google Sheets tab chips are tiny.
   ss.getSheetByName('Home')             && ss.getSheetByName('Home').setTabColor('#000000');
   ss.getSheetByName('Schedule')         && ss.getSheetByName('Schedule').setTabColor('#00bcd4');
   ss.getSheetByName('Data_Entry')       && ss.getSheetByName('Data_Entry').setTabColor('#00bcd4');
   ss.getSheetByName('Roster')           && ss.getSheetByName('Roster').setTabColor('#00bcd4');
   ss.getSheetByName('School_Records')   && ss.getSheetByName('School_Records').setTabColor('#00bcd4');
+  ss.getSheetByName('Historical_PRs')   && ss.getSheetByName('Historical_PRs').setTabColor('#00bcd4');
   ss.getSheetByName('Lineup_View')      && ss.getSheetByName('Lineup_View').setTabColor('#ff6d00');
   ss.getSheetByName('Event_Form_Printable') && ss.getSheetByName('Event_Form_Printable').setTabColor('#ff6d00');
+  ss.getSheetByName('Top_Marks')        && ss.getSheetByName('Top_Marks').setTabColor('#674ea7');
+  ss.getSheetByName('Athlete_Recaps')   && ss.getSheetByName('Athlete_Recaps').setTabColor('#674ea7');
 
   // ── PRINTABLE TABS ── (pure output — selection is on Home tab)
-  ['Lineup_View', 'Event_Form_Printable'].forEach(name => {
+  ['Lineup_View', 'Event_Form_Printable', 'Top_Marks', 'Athlete_Recaps'].forEach(name => {
     const sh = getOrCreateSheet(ss, name);
     sh.clear();
     sh.getRange(1, 1, sh.getMaxRows(), 9).clearNote();
@@ -591,71 +627,128 @@ function generateLineupReport() {
   
   const athRow = byAthleteStart + 2 + sortedAthletes.length;
 
-  // ── CONFERENCE ROSTER ─────────────────────────────────────────
-  // Simple alphabetical list of all participants for conference submission
+  // ── CONFERENCE LINEUP ─────────────────────────────────────────
+  // Event-by-event lineup for conference submission using short name format
   // Positioned at end since it's never printed — only used for digital submission
-  const confRosterStart = athRow + 3;
+  const confLineupStart = athRow + 3;
   
   // Title row
-  sheet.getRange(confRosterStart, 1, 1, 5).merge()
-    .setValue(meetName + " — CONFERENCE ROSTER (" + gender + ")")
+  sheet.getRange(confLineupStart, 1, 1, 5).merge()
+    .setValue(meetName + " — CONFERENCE LINEUP (" + gender + ")")
     .setFontWeight("bold").setFontSize(16)
     .setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBackground("#1c4587").setFontColor("white");
-  sheet.setRowHeight(confRosterStart, 36);
+  sheet.setRowHeight(confLineupStart, 36);
   
-  // Collect unique athlete names from Data_Entry
-  const uniqueDisplayNames = [...new Set(
-    entryData
-      .filter(r => r[0] == meetNum && r[1] == gender && r[3])
-      .map(r => r[3].toString().trim())
-  )];
+  let confRow = confLineupStart + 2;
   
-  // Look up roster info: Display Name (col B) + last name from Athlete Name (col A)
-  const conferenceNames = [];
-  uniqueDisplayNames.forEach(displayName => {
-    const nameL = displayName.toLowerCase();
-    const rosterRow = rosterData.slice(1).find(r => {
-      const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
-      const rosterFull = (r[0] || '').toString().trim().toLowerCase();
-      return rosterDisplay === nameL || rosterFull === nameL;
-    });
+  // Loop through each event and list athletes in conference format
+  PRINT_EVT.forEach(ev => {
+    const eventAthletes = entryData.filter(r => r[0] == meetNum && r[1] == gender && r[2] == ev);
     
-    if (rosterRow) {
-      // Use Display Name (col B) for first name, extract last name from Athlete Name (col A)
-      const displayNameUse = (rosterRow[1] || displayName).toString().trim();
-      const fullName = (rosterRow[0] || '').toString().trim();
-      const nameParts = fullName.split(/\s+/);
-      const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+    if (eventAthletes.length === 0) return; // skip events with no entries
+    
+    // Event header
+    sheet.getRange(confRow, 1)
+      .setValue(ev.toUpperCase())
+      .setFontWeight("bold").setFontSize(11)
+      .setBackground("#e0e0e0");
+    confRow++;
+    
+    // Collect athlete names and format for conference
+    const conferenceNames = [];
+    
+    if (isRelayEvent(ev)) {
+      // For relays, group by team ID and list all members
+      const teams = [...new Set(eventAthletes.map(a => a[4] || "1"))];
+      teams.forEach(tId => {
+        const members = eventAthletes.filter(a => a[4] == tId);
+        members.forEach(m => {
+          const displayName = m[3].toString().trim();
+          const nameL = displayName.toLowerCase();
+          const rosterRow = rosterData.slice(1).find(r => {
+            const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
+            const rosterFull = (r[0] || '').toString().trim().toLowerCase();
+            return rosterDisplay === nameL || rosterFull === nameL;
+          });
+          
+          if (rosterRow) {
+            const displayNameUse = (rosterRow[1] || displayName).toString().trim();
+            const fullName = (rosterRow[0] || '').toString().trim();
+            const nameParts = fullName.split(/\s+/);
+            const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+            conferenceNames.push({
+              displayName: displayNameUse,
+              lastName: lastName,
+              teamId: tId
+            });
+          }
+        });
+      });
       
-      conferenceNames.push({
-        displayName: displayNameUse,
-        lastName: lastName
+      // Format relay names with team grouping
+      const teamGroups = {};
+      conferenceNames.forEach(cn => {
+        if (!teamGroups[cn.teamId]) teamGroups[cn.teamId] = [];
+        teamGroups[cn.teamId].push(cn);
       });
+      
+      Object.keys(teamGroups).sort().forEach(tId => {
+        const teamMembers = teamGroups[tId];
+        const formattedNames = formatConferenceNamesFromParts(teamMembers);
+        
+        if (formattedNames.length > 0) {
+          sheet.getRange(confRow, 1)
+            .setValue("Team " + tId + ": " + formattedNames.join(", "))
+            .setFontSize(10);
+          confRow++;
+        }
+      });
+      
     } else {
-      // Fallback: use Data_Entry name as-is
-      const parts = displayName.split(/\s+/);
-      conferenceNames.push({
-        displayName: parts.slice(0, -1).join(' ') || parts[0],
-        lastName: parts[parts.length - 1] || ''
+      // For individual events, list each athlete
+      eventAthletes.forEach(a => {
+        const displayName = a[3].toString().trim();
+        const nameL = displayName.toLowerCase();
+        const rosterRow = rosterData.slice(1).find(r => {
+          const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
+          const rosterFull = (r[0] || '').toString().trim().toLowerCase();
+          return rosterDisplay === nameL || rosterFull === nameL;
+        });
+        
+        if (rosterRow) {
+          const displayNameUse = (rosterRow[1] || displayName).toString().trim();
+          const fullName = (rosterRow[0] || '').toString().trim();
+          const nameParts = fullName.split(/\s+/);
+          const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          conferenceNames.push({
+            displayName: displayNameUse,
+            lastName: lastName
+          });
+        } else {
+          // Fallback: use display name from Data_Entry
+          const parts = displayName.split(/\s+/);
+          conferenceNames.push({
+            displayName: parts.slice(0, -1).join(' ') || parts[0],
+            lastName: parts[parts.length - 1] || ''
+          });
+        }
       });
+      
+      // Format and output individual names
+      const formattedNames = formatConferenceNamesFromParts(conferenceNames);
+      if (formattedNames.length > 0) {
+        formattedNames.forEach(name => {
+          sheet.getRange(confRow, 1)
+            .setValue(name)
+            .setFontSize(10);
+          confRow++;
+        });
+      }
     }
-  });
-  
-  // Format names: "DisplayName L" or "DisplayName LastName" if duplicates
-  const formattedNames = formatConferenceNamesFromParts(conferenceNames);
-  
-  // Batch write all names at once for performance
-  if (formattedNames.length > 0) {
-    const confDataStart = confRosterStart + 2;
-    const confValues = formattedNames.map(name => [name]);
-    sheet.getRange(confDataStart, 1, formattedNames.length, 1).setValues(confValues);
     
-    // Apply formatting
-    sheet.getRange(confDataStart, 1, formattedNames.length, 1)
-      .setFontSize(11)
-      .setBorder(true, true, true, true, false, null);
-  }
+    confRow++; // blank line between events
+  });
 }
 
 // ── 3. EVENT FORM REPORT ──────────────────────────────────────
@@ -1351,6 +1444,9 @@ function formatCellValue(val) {
  * Scans results from a selected meet and updates Roster PRs where athletes
  * have improved. Shows a confirmation dialog before making changes.
  * Uses Home B3 (Meet #) and B4 (Gender).
+ * 
+ * For individual events: uses Result/Mark (col F)
+ * For relay events: uses individual leg split (col G)
  */
 function findAndUpdatePRs() {
   const ss         = SpreadsheetApp.getActiveSpreadsheet();
@@ -1358,7 +1454,7 @@ function findAndUpdatePRs() {
   const home       = ss.getSheetByName('Home');
   const meetNum    = home.getRange("B3").getValue();
   const gender     = home.getRange("B4").getValue();
-  const statusCell = home.getRange("A9:B9");
+  const statusCell = home.getRange("A10:B10");
 
   if (!meetNum || !gender) {
     statusCell.setValue("⚠️ Select Meet # and Gender first").setBackground("#f4cccc").setFontColor("#990000");
@@ -1373,17 +1469,21 @@ function findAndUpdatePRs() {
   const rosterData  = rosterSheet.getDataRange().getValues();
   const rosterHeaders = rosterData[0];
 
-  // Filter to this meet/gender, exclude relays and no-marks
+  // Filter to this meet/gender, exclude no-marks
   const results = entryData.slice(1).filter(r => {
     if (r[0] != meetNum || r[1] != gender) return false;
-    if (isRelayEvent(r[2])) return false; // skip relays (team results)
-    if (isNoMark(r[5])) return false;     // skip DNS/DNR/DQ/CANCELLED/NA/etc
+    // For relays, we need a split time in column G
+    if (isRelayEvent(r[2])) {
+      return r[6] && !isNoMark(r[6]); // use split time for relay legs
+    }
+    // For individual events, use result from column F
+    if (isNoMark(r[5])) return false;
     return true;
   });
 
   if (results.length === 0) {
     statusCell.setValue("ℹ️ No valid results found").setBackground("#fff2cc").setFontColor("#7f6000");
-    ui.alert('ℹ️ No Results', 'No valid individual results found for Meet #' + meetNum + ' / ' + gender + '.', ui.ButtonSet.OK);
+    ui.alert('ℹ️ No Results', 'No valid results found for Meet #' + meetNum + ' / ' + gender + '.', ui.ButtonSet.OK);
     return;
   }
 
@@ -1394,7 +1494,8 @@ function findAndUpdatePRs() {
   results.forEach(r => {
     const name   = r[3];
     const event  = r[2];
-    const result = r[5];
+    // For relay events, use split time (col G); for individual events, use result (col F)
+    const result = isRelayEvent(event) ? r[6] : r[5];
     const nameL  = name.toString().trim().toLowerCase();
 
     // Find athlete in Roster
@@ -1430,6 +1531,7 @@ function findAndUpdatePRs() {
         event: event,
         oldPR: hasNoPR ? '(none)' : formatCellValue(currentPR),
         newPR: formatCellValue(result),
+        newPRRaw: result,  // keep raw value for writing
         rowIdx: rosterRowIdx,
         colIdx: eventColIdx
       });
@@ -1490,9 +1592,9 @@ function findAndUpdatePRs() {
   // Apply updates
   updates.forEach(u => {
     // Update in-memory array (for subsequent updates in this batch)
-    rosterData[u.rowIdx][u.colIdx] = u.newPR;
-    // Write to sheet (row is 1-indexed, col is 1-indexed)
-    rosterSheet.getRange(u.rowIdx + 1, u.colIdx + 1).setValue(u.newPR);
+    rosterData[u.rowIdx][u.colIdx] = u.newPRRaw;
+    // Write to sheet (row is 1-indexed, col is 1-indexed) - use raw value not formatted string
+    rosterSheet.getRange(u.rowIdx + 1, u.colIdx + 1).setValue(u.newPRRaw);
   });
 
   statusCell.setValue("✅ " + updates.length + " PR" + (updates.length === 1 ? '' : 's') + " updated")
@@ -1567,4 +1669,342 @@ function findPR(rData, athleteName, eventName) {
   }
 
   return athRow ? formatCellValue(athRow[evIdx]) : "";
+}
+
+// ── 5. TOP MARKS (YTD) ────────────────────────────────────────
+
+/**
+ * Generate Top 3 Marks report showing best boys and girls for each event
+ * based on current year Data_Entry results.
+ */
+function generateTopMarks() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Top_Marks');
+  const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  
+  sheet.clear();
+  sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
+  sheet.setRowHeights(1, sheet.getMaxRows(), 21);
+  
+  // Title row
+  sheet.getRange("A1:D1").merge()
+    .setValue("TOP 3 MARKS — YEAR TO DATE")
+    .setFontWeight("bold").setFontSize(16)
+    .setHorizontalAlignment("center").setVerticalAlignment("middle")
+    .setBackground("#674ea7").setFontColor("white");
+  sheet.setRowHeight(1, 36);
+  
+  let row = 3;
+  
+  // Helper function to parse mark values for comparison
+  const parseVal = (val) => {
+    if (val instanceof Date) val = formatCellValue(val);
+    const str = val.toString().trim();
+    if (str.includes("'")) {
+      const parts = str.split("'");
+      const feet = parseFloat(parts[0]) || 0;
+      const inches = parts[1] ? parseFloat(parts[1].replace('"', '')) || 0 : 0;
+      return (feet * 12) + inches;
+    }
+    if (str.includes(':')) {
+      const parts = str.split(':');
+      return (parseFloat(parts[0]) * 60) + parseFloat(parts[1]);
+    }
+    return parseFloat(str.replace(/[^\d.]/g, '')) || 0;
+  };
+  
+  // Process each event
+  PRINT_EVT.forEach(ev => {
+    // Skip relay events
+    if (isRelayEvent(ev)) return;
+    
+    const isField = ev.includes("Jump") || ev.includes("Put") || ev.includes("Discus") || ev.includes("High Jump");
+    
+    // Get all boys results for this event
+    const boysResults = entryData.slice(1)
+      .filter(r => r[1] === 'Boys' && r[2] === ev && r[5] && !isNoMark(r[5]))
+      .map(r => ({ name: r[3].toString().trim(), mark: r[5] }));
+    
+    // Get all girls results for this event
+    const girlsResults = entryData.slice(1)
+      .filter(r => r[1] === 'Girls' && r[2] === ev && r[5] && !isNoMark(r[5]))
+      .map(r => ({ name: r[3].toString().trim(), mark: r[5] }));
+    
+    if (boysResults.length === 0 && girlsResults.length === 0) return; // skip if no results
+    
+    // Group by athlete and keep only their best mark
+    const getBestByAthlete = (results) => {
+      const athleteMap = {};
+      results.forEach(r => {
+        const existing = athleteMap[r.name];
+        if (!existing) {
+          athleteMap[r.name] = r;
+        } else {
+          const existingVal = parseVal(existing.mark);
+          const newVal = parseVal(r.mark);
+          const isBetter = isField ? (newVal > existingVal) : (newVal < existingVal);
+          if (isBetter) {
+            athleteMap[r.name] = r;
+          }
+        }
+      });
+      return Object.values(athleteMap);
+    };
+    
+    const boysBest = getBestByAthlete(boysResults);
+    const girlsBest = getBestByAthlete(girlsResults);
+    
+    // Sort by best mark and take top 3 athletes
+    const sortBoys = boysBest.sort((a, b) => {
+      const aVal = parseVal(a.mark);
+      const bVal = parseVal(b.mark);
+      return isField ? bVal - aVal : aVal - bVal; // field: bigger better, track: smaller better
+    }).slice(0, 3);
+    
+    const sortGirls = girlsBest.sort((a, b) => {
+      const aVal = parseVal(a.mark);
+      const bVal = parseVal(b.mark);
+      return isField ? bVal - aVal : aVal - bVal;
+    }).slice(0, 3);
+    
+    // Event header
+    sheet.getRange(row, 1, 1, 4).merge()
+      .setValue(ev.toUpperCase())
+      .setFontWeight("bold").setFontSize(12)
+      .setBackground("#e0e0e0");
+    row++;
+    
+    // Column headers
+    sheet.getRange(row, 1).setValue("BOYS").setFontWeight("bold").setBackground("#cfe2f3");
+    sheet.getRange(row, 2).setValue("Mark").setFontWeight("bold").setBackground("#cfe2f3");
+    sheet.getRange(row, 3).setValue("GIRLS").setFontWeight("bold").setBackground("#f4cccc");
+    sheet.getRange(row, 4).setValue("Mark").setFontWeight("bold").setBackground("#f4cccc");
+    row++;
+    
+    // Write top 3 athletes for both
+    const maxRows = Math.max(sortBoys.length, sortGirls.length, 3);
+    for (let i = 0; i < maxRows; i++) {
+      if (sortBoys[i]) {
+        sheet.getRange(row, 1).setValue(sortBoys[i].name);
+        sheet.getRange(row, 2).setValue(formatCellValue(sortBoys[i].mark));
+      }
+      if (sortGirls[i]) {
+        sheet.getRange(row, 3).setValue(sortGirls[i].name);
+        sheet.getRange(row, 4).setValue(formatCellValue(sortGirls[i].mark));
+      }
+      row++;
+    }
+    
+    row++; // blank line between events
+  });
+  
+  // Set column widths
+  sheet.setColumnWidth(1, 180);
+  sheet.setColumnWidth(2, 100);
+  sheet.setColumnWidth(3, 180);
+  sheet.setColumnWidth(4, 100);
+  
+  SpreadsheetApp.getUi().alert('✅ Top Marks report generated!');
+}
+
+// ── 6. ATHLETE RECAPS (YEAR-END) ──────────────────────────────
+
+/**
+ * Generate year-end recap for all athletes showing meet-by-meet results
+ * and year-by-year PR tables. Format matches the PDF template provided.
+ */
+function generateAllAthleteRecaps() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName('Athlete_Recaps');
+  const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
+  const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const rosterData = ss.getSheetByName('Roster').getDataRange().getValues();
+  const histData = ss.getSheetByName('Historical_PRs').getDataRange().getValues();
+  
+  sheet.clear();
+  sheet.getRange(1, 1, sheet.getMaxRows(), 10).clearNote();
+  sheet.setRowHeights(1, sheet.getMaxRows(), 21);
+  
+  let currentRow = 1;
+  
+  // Get all unique athletes from roster
+  const athletes = rosterData.slice(1).filter(r => r[0]); // has athlete name
+  
+  if (athletes.length === 0) {
+    SpreadsheetApp.getUi().alert('⚠️ No athletes found in Roster tab.');
+    return;
+  }
+  
+  athletes.forEach((athlete, athleteIdx) => {
+    const athleteName = athlete[0].toString().trim();
+    const displayName = (athlete[1] || athleteName).toString().trim();
+    
+    // Check if we're running out of rows (Google Sheets max is ~10000)
+    if (currentRow > 9000) {
+      SpreadsheetApp.getUi().alert('⚠️ Approaching row limit. Generated ' + athleteIdx + ' of ' + athletes.length + ' athletes.');
+      return;
+    }
+    
+    try {
+      // Header: School name, Year, Athlete name
+      sheet.getRange(currentRow, 1, 1, 8).merge()
+        .setValue("Our Lady of Lourdes Track")
+        .setFontWeight("bold").setFontSize(14)
+        .setHorizontalAlignment("center");
+      currentRow++;
+      
+      sheet.getRange(currentRow, 1, 1, 8).merge()
+        .setValue("2026") // current year
+        .setFontWeight("bold").setFontSize(12)
+        .setHorizontalAlignment("center");
+      currentRow++;
+      
+      sheet.getRange(currentRow, 1, 1, 8).merge()
+        .setValue(displayName)
+        .setFontWeight("bold").setFontSize(12)
+        .setHorizontalAlignment("center");
+      currentRow++;
+      currentRow++; // blank line
+    
+    const leftColStart = currentRow;
+    let leftRow = leftColStart;
+    
+    // LEFT COLUMN: Meet-by-meet boxes (cols A-C)
+    const meets = schedData.slice(1).filter(r => r[0]); // has meet #
+    meets.forEach(meet => {
+      const meetNum = meet[0];
+      const meetName = meet[6] || "Meet";
+      // Format date properly (don't use formatCellValue for actual dates)
+      let meetDate = "";
+      if (meet[1]) {
+        if (meet[1] instanceof Date) {
+          meetDate = Utilities.formatDate(meet[1], Session.getScriptTimeZone(), "M/d/yyyy");
+        } else {
+          meetDate = meet[1].toString();
+        }
+      }
+      
+      // Get this athlete's results for this meet
+      const athleteResults = entryData.slice(1).filter(r => {
+        const entryName = r[3] ? r[3].toString().trim().toLowerCase() : "";
+        const matchName = athleteName.toLowerCase();
+        const matchDisplay = displayName.toLowerCase();
+        return r[0] == meetNum && (entryName === matchName || entryName === matchDisplay);
+      });
+      
+      // Meet box header
+      sheet.getRange(leftRow, 1, 1, 3).merge()
+        .setValue(meetName + " " + meetDate)
+        .setFontWeight("bold").setFontSize(10)
+        .setBorder(true, true, true, true, false, false)
+        .setBackground("#d9d9d9");
+      leftRow++;
+      
+      if (athleteResults.length === 0) {
+        sheet.getRange(leftRow, 1, 1, 3).merge()
+          .setValue("-")
+          .setHorizontalAlignment("center")
+          .setBorder(true, true, true, true, false, false);
+        leftRow++;
+      } else {
+        // List each event and result
+        athleteResults.forEach(res => {
+          const event = res[2];
+          const mark = formatCellValue(res[5]);
+          sheet.getRange(leftRow, 1, 1, 2).merge().setValue(event).setFontSize(9)
+            .setBorder(true, true, true, true, false, false);
+          sheet.getRange(leftRow, 3).setValue(mark).setFontSize(9)
+            .setBorder(true, true, true, true, false, false);
+          leftRow++;
+        });
+      }
+      
+      leftRow++; // space between meet boxes
+    });
+    
+    // RIGHT COLUMN: Year-by-year PR tables (cols E-H)
+    let rightRow = leftColStart;
+    
+    // PR table header
+    sheet.getRange(rightRow, 5, 1, 2).merge()
+      .setValue("Personal Records")
+      .setFontWeight("bold").setFontSize(11)
+      .setHorizontalAlignment("center");
+    rightRow++;
+    
+    // Current year (2026) from Roster
+    sheet.getRange(rightRow, 5).setValue("Event").setFontWeight("bold").setBackground("#e0e0e0");
+    sheet.getRange(rightRow, 6).setValue("2026").setFontWeight("bold").setBackground("#e0e0e0");
+    rightRow++;
+    
+    const rosterHeaders = rosterData[0];
+    PRINT_EVT.forEach(ev => {
+      const evIdx = rosterHeaders.indexOf(ev);
+      if (evIdx >= 0) {
+        const pr = athlete[evIdx] ? formatCellValue(athlete[evIdx]) : "-";
+        if (pr && pr !== "-") {
+          sheet.getRange(rightRow, 5).setValue(ev).setFontSize(9);
+          sheet.getRange(rightRow, 6).setValue(pr).setFontSize(9);
+          rightRow++;
+        }
+      }
+    });
+    
+    rightRow++; // blank line
+    
+    // Historical years from Historical_PRs tab
+    const histHeaders = histData[0];
+    const athleteHistRows = histData.slice(1).filter(r => {
+      const hName = (r[0] || '').toString().trim().toLowerCase();
+      const hDisplay = (r[1] || '').toString().trim().toLowerCase();
+      return hName === athleteName.toLowerCase() || hDisplay === displayName.toLowerCase();
+    });
+    
+    // Get unique years, sorted descending
+    const years = [...new Set(athleteHistRows.map(r => r[2]))].sort((a, b) => b - a);
+    
+    years.forEach(year => {
+      const yearRow = athleteHistRows.find(r => r[2] === year);
+      if (!yearRow) return;
+      
+      sheet.getRange(rightRow, 5).setValue("Event").setFontWeight("bold").setBackground("#e0e0e0");
+      sheet.getRange(rightRow, 6).setValue(year).setFontWeight("bold").setBackground("#e0e0e0");
+      rightRow++;
+      
+      PRINT_EVT.forEach(ev => {
+        const evIdx = histHeaders.indexOf(ev);
+        if (evIdx >= 0) {
+          const pr = yearRow[evIdx] ? formatCellValue(yearRow[evIdx]) : "-";
+          if (pr && pr !== "-") {
+            sheet.getRange(rightRow, 5).setValue(ev).setFontSize(9);
+            sheet.getRange(rightRow, 6).setValue(pr).setFontSize(9);
+            rightRow++;
+          }
+        }
+      });
+      
+      rightRow++; // blank line between years
+    });
+    
+    // Move to next athlete (add spacing)
+    currentRow = Math.max(leftRow, rightRow) + 5;
+    
+    } catch(err) {
+      // Log error but continue with next athlete
+      Logger.log('Error generating recap for ' + displayName + ': ' + err.message);
+    }
+    
+    // Flush after each athlete to avoid API rate limits
+    SpreadsheetApp.flush();
+  });
+  
+  // Set column widths
+  sheet.setColumnWidth(1, 200);
+  sheet.setColumnWidth(2, 120);
+  sheet.setColumnWidth(3, 100);
+  sheet.setColumnWidth(4, 20); // gutter
+  sheet.setColumnWidth(5, 180);
+  sheet.setColumnWidth(6, 100);
+  
+  SpreadsheetApp.getUi().alert('✅ Athlete Recaps generated for ' + athletes.length + ' athletes!');
 }
