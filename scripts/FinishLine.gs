@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.34";
+const VERSION = "v2.36";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -514,14 +514,22 @@ function generateLineupReport() {
         }
         // Team header — dark to distinguish from athlete rows
         sheet.getRange(row, col, 1, 2)
-          .setValues([["\u25b8 TEAM " + tId, "LEG SPLIT"]])
+          .setValues([["\u25b8 TEAM " + tId, "PR"]])
           .setBackground("#444444").setFontColor("white").setFontWeight("bold")
           .setBorder(true, true, true, true, true, null);
         row++;
         aths.filter(a => a[4] == tId).forEach((m, idx) => {
+          const pr = findPR(rosterData, m[3], ev);
+          const prDisplay = (pr && pr !== "-") ? pr : "—";
           sheet.getRange(row, col, 1, 2)
-            .setValues([["  " + (idx + 1) + ". " + m[3], m[6] || ""]])
+            .setValues([["  " + (idx + 1) + ". " + m[3], prDisplay]])
             .setBorder(true, true, true, true, true, null);
+
+          if (pr && pr !== "-") {
+            sheet.getRange(row, col + 1).setFontColor("#1155cc");
+          } else {
+            sheet.getRange(row, col + 1).setBackground("#cfe2f3").setNote("⭐ No prior PR on record");
+          }
           row++;
         });
       });
@@ -529,30 +537,7 @@ function generateLineupReport() {
       aths.forEach(a => {
         const pr = findPR(rosterData, a[3], ev);
         const prDisplay = (pr && pr !== "-") ? pr : "—";
-        
-        // Get starting distance for jump events
-        let startDist = null;
-        if (ev === "High Jump" || ev === "Long Jump") {
-          const startDistColName = ev + " Start Dist";
-          const rosterHeaders = rosterData[0];
-          const startDistIdx = rosterHeaders.indexOf(startDistColName);
-          
-          if (startDistIdx >= 0) {
-            const nameL = a[3].toString().trim().toLowerCase();
-            const athleteRow = rosterData.slice(1).find(r => {
-              const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
-              const rosterFull = (r[0] || '').toString().trim().toLowerCase();
-              return rosterDisplay === nameL || rosterFull === nameL;
-            });
-            
-            if (athleteRow && athleteRow[startDistIdx]) {
-              const dist = formatCellValue(athleteRow[startDistIdx]);
-              if (dist && dist !== "-") {
-                startDist = dist;
-              }
-            }
-          }
-        }
+        const startDist = getStartDistance(rosterData, a[3], ev);
         
         const nameCell = sheet.getRange(row, col);
         if (startDist) {
@@ -627,6 +612,10 @@ function generateLineupReport() {
     
     // For relay events, determine leg position
     let eventText = event;
+    const startDist = getStartDistance(rosterData, name, event);
+    if (startDist) {
+      eventText += " (start: " + startDist + ")";
+    }
     if (isRelayEvent(event) && teamId) {
       const teamMembers = entryData.filter(
         m => m[0] == meetNum && m[1] == gender && m[2] == event && m[4] == teamId
@@ -967,21 +956,34 @@ function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     const res   = formatCellValue(a[5]);
     const place = a[8];
     const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const startDist = getStartDistance(rosterData, a[3], ev);
 
     const nameCell   = sheet.getRange(row, col);
     const resultCell = sheet.getRange(row, col + 1);
     const rowRange   = sheet.getRange(row, col, 1, 2);
-    const nameText   = a[3] + "  (PR: " + (pr || "—") + ")";
+    const nameBase   = a[3] + (startDist ? " (start: " + startDist + ")" : "");
+    const nameText   = nameBase + "  (PR: " + (pr || "—") + ")";
     if (pr && pr !== "-") {
-      nameCell.setRichTextValue(
-        SpreadsheetApp.newRichTextValue()
-          .setText(nameText)
-          .setTextStyle(a[3].length + 2, nameText.length,
-            SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build())
-          .build()
-      );
+      const rtv = SpreadsheetApp.newRichTextValue().setText(nameText)
+        .setTextStyle(nameBase.length + 2, nameText.length,
+          SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build());
+      if (startDist) {
+        rtv.setTextStyle(a[3].length, nameBase.length,
+          SpreadsheetApp.newTextStyle().setFontSize(9).setItalic(true).build());
+      }
+      nameCell.setRichTextValue(rtv.build());
     } else {
-      nameCell.setValue(nameText);
+      if (startDist) {
+        nameCell.setRichTextValue(
+          SpreadsheetApp.newRichTextValue()
+            .setText(nameText)
+            .setTextStyle(a[3].length, nameBase.length,
+              SpreadsheetApp.newTextStyle().setFontSize(9).setItalic(true).build())
+            .build()
+        );
+      } else {
+        nameCell.setValue(nameText);
+      }
     }
     resultCell.setValue(res + plTag);
     rowRange.setBorder(true, true, true, true, true, null);
@@ -1094,22 +1096,35 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     const place    = a[8];
     const plTag    = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
     const attempts = a[6] ? a[6].toString().split(",").map(s => s.trim()) : [];
+    const startDist = getStartDistance(rosterData, a[3], ev);
 
     // Athlete main row
     const nameCell   = sheet.getRange(row, col);
     const resultCell = sheet.getRange(row, col + 1);
     const rowRange   = sheet.getRange(row, col, 1, 2);
-    const nameText   = a[3] + "  (PR: " + (pr || "—") + ")";
+    const nameBase   = a[3] + (startDist ? " (start: " + startDist + ")" : "");
+    const nameText   = nameBase + "  (PR: " + (pr || "—") + ")";
     if (pr && pr !== "-") {
-      nameCell.setRichTextValue(
-        SpreadsheetApp.newRichTextValue()
-          .setText(nameText)
-          .setTextStyle(a[3].length + 2, nameText.length,
-            SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build())
-          .build()
-      );
+      const rtv = SpreadsheetApp.newRichTextValue().setText(nameText)
+        .setTextStyle(nameBase.length + 2, nameText.length,
+          SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build());
+      if (startDist) {
+        rtv.setTextStyle(a[3].length, nameBase.length,
+          SpreadsheetApp.newTextStyle().setFontSize(9).setItalic(true).build());
+      }
+      nameCell.setRichTextValue(rtv.build());
     } else {
-      nameCell.setValue(nameText);
+      if (startDist) {
+        nameCell.setRichTextValue(
+          SpreadsheetApp.newRichTextValue()
+            .setText(nameText)
+            .setTextStyle(a[3].length, nameBase.length,
+              SpreadsheetApp.newTextStyle().setFontSize(9).setItalic(true).build())
+            .build()
+        );
+      } else {
+        nameCell.setValue(nameText);
+      }
     }
     resultCell.setValue(res + plTag);
     rowRange.setBorder(true, true, true, true, true, null).setFontWeight("bold");
@@ -1247,6 +1262,29 @@ function isSplitEvent(ev) {
 
 function isAttemptEvent(ev) {
   return ATTEMPT_EVTS.some(s => ev === s);
+}
+
+function findRosterAthleteRow(rosterData, athleteName) {
+  const nameL = (athleteName || '').toString().trim().toLowerCase();
+  if (!nameL) return null;
+  return rosterData.slice(1).find(r => {
+    const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
+    const rosterFull = (r[0] || '').toString().trim().toLowerCase();
+    return rosterDisplay === nameL || rosterFull === nameL;
+  }) || null;
+}
+
+function getStartDistance(rosterData, athleteName, eventName) {
+  if (eventName !== "High Jump" && eventName !== "Long Jump") return null;
+  const rosterHeaders = rosterData[0] || [];
+  const startDistIdx = rosterHeaders.indexOf(eventName + " Start Dist");
+  if (startDistIdx < 0) return null;
+
+  const athleteRow = findRosterAthleteRow(rosterData, athleteName);
+  if (!athleteRow || !athleteRow[startDistIdx]) return null;
+
+  const dist = formatCellValue(athleteRow[startDistIdx]);
+  return (dist && dist !== "-") ? dist : null;
 }
 
 function getOrCreateSheet(ss, name) {
