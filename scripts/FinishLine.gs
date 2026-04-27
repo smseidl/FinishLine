@@ -31,7 +31,10 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.36";
+const VERSION = "v2.38";
+
+// ── HOME TAB LAYOUT ──────────────────────────────────────────
+const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -99,7 +102,7 @@ function onEditInstallable(e) {
   const ss         = SpreadsheetApp.getActiveSpreadsheet();
   const meetNum    = home.getRange("B3").getValue();
   const gender     = home.getRange("B4").getValue();
-  const statusCell = home.getRange("A11:B11");
+  const statusCell = home.getRange(HOME_STATUS_CELL);
 
   // Clear any previous status from the status cell
   statusCell.merge().setValue("").setBackground(null).setFontColor("#000000").setFontWeight("normal");
@@ -340,7 +343,7 @@ function fullInitialize() {
     .setFontSize(8).setFontStyle("italic").setFontColor("#666666");
   home.setRowHeight(6, 16);
   // Row 11: status cell — written to by onEditInstallable to show progress/errors
-  home.getRange("A11:B11").merge()
+  home.getRange(HOME_STATUS_CELL).merge()
     .setValue("")
     .setBackground(null).setFontWeight("normal");
   home.setRowHeight(11, 28);
@@ -1540,7 +1543,7 @@ function findAndUpdatePRs() {
   const home       = ss.getSheetByName('Home');
   const meetNum    = home.getRange("B3").getValue();
   const gender     = home.getRange("B4").getValue();
-  const statusCell = home.getRange("A10:B10");
+  const statusCell = home.getRange(HOME_STATUS_CELL);
 
   if (!meetNum || !gender) {
     statusCell.setValue("⚠️ Select Meet # and Gender first").setBackground("#f4cccc").setFontColor("#990000");
