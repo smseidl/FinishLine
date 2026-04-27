@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.38";
+const VERSION = "v2.43";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -75,6 +75,7 @@ function onOpen() {
     .addSeparator()
     .addItem('6. Check PR Setup (debug)',          'checkPRSetup')
     .addItem('7. Check Meet Roster (debug)',         'checkMeetRoster')
+    .addItem('8. Generate Filtered Results',         'generateFilteredResults')
     .addToUi();
 }
 
@@ -1501,6 +1502,305 @@ function checkMeetRoster() {
       'Display Name (or Athlete Name) in the Roster tab.'
     );
   }
+}
+
+/**
+ * Generate a generic filtered results export by joining Data_Entry with
+ * Roster grade. Useful for requests like: "all 100/200 times for 5th grade".
+ *
+ * Prompts:
+ *   - Grade(s): required, comma-separated (e.g. "5" or "5,6")
+ *   - Event filter: optional, comma-separated keywords or exact names
+ *                   (e.g. "100,200" or "100 M Dash,200 M Dash")
+ *   - Sort mode: choose output ordering (all modes separate genders)
+ */
+function generateFilteredResults() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const rosterData = ss.getSheetByName('Roster').getDataRange().getValues();
+  const out = getOrCreateSheet(ss, 'Filtered_Results');
+
+  const gradeResp = ui.prompt(
+    'Generate Filtered Results',
+    'Enter grade(s), comma-separated (examples: 5 or 5,6):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (gradeResp.getSelectedButton() !== ui.Button.OK) return;
+
+  const gradeInput = gradeResp.getResponseText().trim();
+  if (!gradeInput) {
+    ui.alert('Please enter at least one grade.');
+    return;
+  }
+
+  const eventListText = PRINT_EVT.map((ev, idx) => (idx + 1) + '. ' + ev).join('\n');
+
+  const eventResp = ui.prompt(
+    'Generate Filtered Results',
+    'Optional event filter (comma-separated). Leave blank for all events.\n' +
+    'You can enter event numbers, names, or keywords.\n' +
+    'Examples: 2,8  OR  100,200  OR  100 M Dash,200 M Dash\n\n' +
+    'Event numbers:\n' + eventListText,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (eventResp.getSelectedButton() !== ui.Button.OK) return;
+
+  const eventInput = eventResp.getResponseText().trim();
+
+  const sortResp = ui.prompt(
+    'Generate Filtered Results',
+    'Sort mode:\n' +
+    '1 = Gender > Meet > Event > Athlete (default)\n' +
+    '2 = Gender > Event > Best Performance > Athlete\n' +
+    '3 = Gender > Athlete > Event > Meet\n' +
+    '4 = Gender > Best Performance > Athlete (all events mixed)\n' +
+    '5 = Gender > Athlete > Best Performance (all events mixed)',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (sortResp.getSelectedButton() !== ui.Button.OK) return;
+  const sortMode = (sortResp.getResponseText().trim() || '1');
+
+  const normalizeGrade = (v) =>
+    (v || '')
+      .toString()
+      .trim()
+      .toLowerCase()
+      .replace(/grade/g, '')
+      .replace(/(st|nd|rd|th)\b/g, '')
+      .replace(/[^a-z0-9]/g, '');
+
+  const gradeTokens = gradeInput
+    .split(',')
+    .map(s => normalizeGrade(s))
+    .filter(Boolean);
+
+  const eventTokens = [];
+  const selectedEventsByNumber = new Set();
+  const eventLabelParts = [];
+  if (eventInput) {
+    eventInput.split(',').map(s => s.trim()).filter(Boolean).forEach(token => {
+      if (/^\d+$/.test(token)) {
+        const idx = parseInt(token, 10) - 1;
+        if (idx >= 0 && idx < PRINT_EVT.length) {
+          selectedEventsByNumber.add(PRINT_EVT[idx].toLowerCase());
+          eventLabelParts.push(PRINT_EVT[idx]);
+        }
+      } else {
+        eventTokens.push(token.toLowerCase());
+        eventLabelParts.push(token);
+      }
+    });
+  }
+
+  const rosterHeaders = rosterData[0] || [];
+  const gradeIdx = rosterHeaders.indexOf('Grade');
+  if (gradeIdx < 0) {
+    ui.alert('Roster is missing a Grade column.');
+    return;
+  }
+
+  // Map both Display Name and Athlete Name to grade.
+  const nameToGrade = new Map();
+  rosterData.slice(1).forEach(r => {
+    const gradeVal = r[gradeIdx];
+    if (gradeVal === '' || gradeVal === null || gradeVal === undefined) return;
+    const displayName = (r[1] || '').toString().trim().toLowerCase();
+    const fullName = (r[0] || '').toString().trim().toLowerCase();
+    if (displayName && !nameToGrade.has(displayName)) nameToGrade.set(displayName, gradeVal);
+    if (fullName && !nameToGrade.has(fullName)) nameToGrade.set(fullName, gradeVal);
+  });
+
+  const matchesEvent = (eventName) => {
+    if (eventTokens.length === 0 && selectedEventsByNumber.size === 0) return true;
+    const evL = (eventName || '').toString().toLowerCase();
+    if (selectedEventsByNumber.has(evL)) return true;
+    return eventTokens.some(t => evL === t || evL.includes(t));
+  };
+
+  const matchesGrade = (gradeVal) => {
+    const g = normalizeGrade(gradeVal);
+    if (!g) return false;
+    return gradeTokens.some(t => t === g || t.includes(g) || g.includes(t));
+  };
+
+  const parsePerformance = (eventName, value) => {
+    if (value === '' || value === null || value === undefined) return null;
+    let s = value;
+    if (s instanceof Date) s = formatCellValue(s);
+    if (typeof s !== 'string') s = s.toString();
+    s = s.trim();
+    if (!s || isNoMark(s)) return null;
+
+    if (s.includes("'")) {
+      const parts = s.split("'");
+      const feet = parseFloat(parts[0]) || 0;
+      const inches = parts[1] ? parseFloat(parts[1].replace('"', '')) || 0 : 0;
+      return (feet * 12) + inches;
+    }
+    if (s.includes(':')) {
+      const parts = s.split(':');
+      return (parseFloat(parts[0]) * 60) + parseFloat(parts[1]);
+    }
+    return parseFloat(s.replace(/[^\d.]/g, ''));
+  };
+
+  const comparePerformance = (a, b) => {
+    const eventA = a[4];
+    const eventB = b[4];
+    if (eventA !== eventB) return ('' + eventA).localeCompare('' + eventB);
+
+    const aVal = parsePerformance(eventA, a[5]);
+    const bVal = parsePerformance(eventB, b[5]);
+    const aMissing = (aVal === null || isNaN(aVal));
+    const bMissing = (bVal === null || isNaN(bVal));
+
+    if (aMissing && bMissing) return ('' + a[3]).localeCompare('' + b[3]);
+    if (aMissing) return 1;
+    if (bMissing) return -1;
+
+    const isField = eventA.includes("Jump") || eventA.includes("Put") || eventA.includes("Discus") || eventA.includes("High Jump");
+    const perfCompare = isField ? (bVal - aVal) : (aVal - bVal);
+    if (perfCompare !== 0) return perfCompare;
+    return ('' + a[3]).localeCompare('' + b[3]);
+  };
+
+  const comparePerformanceAnyEvent = (a, b) => {
+    const aVal = parsePerformance(a[4], a[5]);
+    const bVal = parsePerformance(b[4], b[5]);
+    const aMissing = (aVal === null || isNaN(aVal));
+    const bMissing = (bVal === null || isNaN(bVal));
+
+    if (aMissing && bMissing) {
+      if (a[3] !== b[3]) return ('' + a[3]).localeCompare('' + b[3]);
+      return ('' + a[4]).localeCompare('' + b[4]);
+    }
+    if (aMissing) return 1;
+    if (bMissing) return -1;
+
+    const aIsField = a[4].includes("Jump") || a[4].includes("Put") || a[4].includes("Discus") || a[4].includes("High Jump");
+    const bIsField = b[4].includes("Jump") || b[4].includes("Put") || b[4].includes("Discus") || b[4].includes("High Jump");
+
+    // Keep track events together before field events for mixed sorting.
+    if (aIsField !== bIsField) return aIsField ? 1 : -1;
+
+    const perfCompare = aIsField ? (bVal - aVal) : (aVal - bVal);
+    if (perfCompare !== 0) return perfCompare;
+    if (a[3] !== b[3]) return ('' + a[3]).localeCompare('' + b[3]);
+    return ('' + a[4]).localeCompare('' + b[4]);
+  };
+
+  const compareGender = (a, b) => ('' + a[1]).localeCompare('' + b[1]);
+
+  const filtered = [];
+  const unmatchedNames = new Set();
+
+  entryData.slice(1).forEach(r => {
+    const meetNum = r[0];
+    const gender = r[1];
+    const event = r[2];
+    const name = r[3];
+    const result = r[5];
+    const splitAttempt = r[6];
+    const place = r[8];
+
+    if (!name || !event) return;
+    if (!matchesEvent(event)) return;
+
+    // Exclude non-performances (DNS/DNR/DQ/CANCELED/etc.) from filtered output.
+    // For relays, prefer split value when present; otherwise fall back to team result.
+    const primaryMark = isRelayEvent(event) ? (splitAttempt || result) : result;
+    if (primaryMark === '' || primaryMark === null || primaryMark === undefined || isNoMark(primaryMark)) return;
+
+    const gradeVal = nameToGrade.get(name.toString().trim().toLowerCase());
+    if (gradeVal === undefined) {
+      unmatchedNames.add(name.toString().trim());
+      return;
+    }
+    if (!matchesGrade(gradeVal)) return;
+
+    filtered.push([
+      meetNum,
+      gender,
+      formatCellValue(gradeVal),
+      name.toString().trim(),
+      event,
+      formatCellValue(result),
+      formatCellValue(splitAttempt),
+      (place === null || place === undefined) ? '' : place
+    ]);
+  });
+
+  if (sortMode === '2') {
+    filtered.sort(comparePerformance);
+    filtered.sort(compareGender);
+  } else if (sortMode === '3') {
+    filtered.sort((a, b) => {
+      if (a[1] !== b[1]) return ('' + a[1]).localeCompare('' + b[1]);
+      if (a[3] !== b[3]) return ('' + a[3]).localeCompare('' + b[3]);
+      if (a[4] !== b[4]) return ('' + a[4]).localeCompare('' + b[4]);
+      return ('' + a[0]).localeCompare('' + b[0], undefined, {numeric: true});
+    });
+  } else if (sortMode === '4') {
+    filtered.sort(comparePerformanceAnyEvent);
+    filtered.sort(compareGender);
+  } else if (sortMode === '5') {
+    filtered.sort((a, b) => {
+      if (a[1] !== b[1]) return ('' + a[1]).localeCompare('' + b[1]);
+      if (a[3] !== b[3]) return ('' + a[3]).localeCompare('' + b[3]);
+      const perfCmp = comparePerformanceAnyEvent(a, b);
+      if (perfCmp !== 0) return perfCmp;
+      return ('' + a[4]).localeCompare('' + b[4]);
+    });
+  } else {
+    filtered.sort((a, b) => {
+      if (a[1] !== b[1]) return ('' + a[1]).localeCompare('' + b[1]);
+      if (a[0] != b[0]) return ('' + a[0]).localeCompare('' + b[0], undefined, {numeric: true});
+      if (a[4] !== b[4]) return ('' + a[4]).localeCompare('' + b[4]);
+      return ('' + a[3]).localeCompare('' + b[3]);
+    });
+  }
+
+  out.clear();
+  out.getRange(1, 1, out.getMaxRows(), 9).clearNote();
+  out.setRowHeights(1, out.getMaxRows(), 21);
+
+  const eventsLabel = eventLabelParts.length > 0 ? eventLabelParts.join(', ') : 'ALL';
+  const title = 'FILTERED RESULTS — Grades: ' + gradeInput + ' | Events: ' + eventsLabel;
+  out.getRange('A1:H1').merge()
+    .setValue(title)
+    .setFontWeight('bold').setFontSize(14)
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#444444').setFontColor('white');
+  out.setRowHeight(1, 32);
+
+  out.getRange('A2:H2').setValues([["Meet #", "Gender", "Grade", "Athlete", "Event", "Result/Mark", "Splits/Attempts", "Place"]])
+    .setFontWeight('bold').setBackground('#e0e0e0');
+
+  if (filtered.length > 0) {
+    out.getRange(3, 1, filtered.length, 8).setValues(filtered);
+    out.getRange(2, 1, filtered.length + 1, 8).setBorder(true, true, true, true, true, true);
+  }
+
+  out.setColumnWidth(1, 70);
+  out.setColumnWidth(2, 80);
+  out.setColumnWidth(3, 70);
+  out.setColumnWidth(4, 180);
+  out.setColumnWidth(5, 160);
+  out.setColumnWidth(6, 110);
+  out.setColumnWidth(7, 180);
+  out.setColumnWidth(8, 70);
+  out.getRange('F:G').setNumberFormat('@');
+
+  const unmatchedMsg = unmatchedNames.size > 0
+    ? '\n\nNote: ' + unmatchedNames.size + ' Data_Entry name(s) had no Roster match and were skipped.'
+    : '';
+
+  ui.alert(
+    '✅ Filtered Results Ready',
+    filtered.length + ' row(s) written to Filtered_Results.' + unmatchedMsg,
+    ui.ButtonSet.OK
+  );
 }
 
 /**
