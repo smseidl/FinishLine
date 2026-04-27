@@ -31,10 +31,12 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.43";
+const VERSION = "v2.55";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
+const PDF_FOLDER_PROP_KEY = "FINISHLINE_PDF_FOLDER_ID";
+const DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive";
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -49,6 +51,16 @@ const PRINT_EVT = [
   "100M Hurdles", "100 M Dash", "1600 M Run", "800 M Relay",
   "400 M Dash", "400 M Relay", "800 M Run", "200 M Dash", "1600 M Relay",
   "High Jump", "Discus", "Shot Put", "Long Jump"
+];
+
+const RELAY_MEET_EVT = [
+  "Hurdle Shuttle", "400 M Relay", "800 M Relay", "Sprint Relay",
+  "1600 M Relay", "Special Relay", "Distance Relay",
+  "Shot Put", "Discus", "Long Jump", "High Jump"
+];
+
+const PENTATHLON_EVT = [
+  "65M Hurdles", "100 M Dash", "800 M Run", "Shot Put", "Long Jump"
 ];
 
 // Events that use comma-separated splits in column G
@@ -69,13 +81,16 @@ function onOpen() {
     .addItem('1. Build / Rebuild Entire System', 'fullInitialize')
     .addItem('2. Generate Printable Lineup',      'generateLineupReport')
     .addItem('3. Generate Printable Event Forms', 'generateEventFormReport')
+    .addItem('4. Save Lineup as PDF',             'saveLineupPdf')
+    .addItem('5. Save Event Forms as PDF',        'saveEventFormsPdf')
     .addSeparator()
-    .addItem('4. Generate Top Marks (YTD)',       'generateTopMarks')
-    .addItem('5. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
+    .addItem('6. Generate Top Marks (YTD)',       'generateTopMarks')
+    .addItem('7. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
+    .addItem('8. Generate Filtered Results',      'generateFilteredResults')
     .addSeparator()
-    .addItem('6. Check PR Setup (debug)',          'checkPRSetup')
-    .addItem('7. Check Meet Roster (debug)',         'checkMeetRoster')
-    .addItem('8. Generate Filtered Results',         'generateFilteredResults')
+    .addItem('9. Check PR Setup (debug)',         'checkPRSetup')
+    .addItem('10. Check Meet Roster (debug)',     'checkMeetRoster')
+    .addItem('11. Check Drive Access (PDF debug)',    'checkDriveAccess')
     .addToUi();
 }
 
@@ -174,7 +189,7 @@ function fullInitialize() {
   sched.setColumnWidth(7, 180);
   sched.setColumnWidth(8, 120);
   sched.setColumnWidth(9, 120);
-  // Type column — reference only, not used by report logic
+  // Type column — drives meet-specific printable event lists
   const typeRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['', 'Regular', 'Dual Meet', 'Invitational', 'Championship', 'Time Trials', 'Relays', '8th Grade Pentathlon', 'Scrimmage'])
     .setAllowInvalid(true).build();
@@ -304,7 +319,7 @@ function fullInitialize() {
 
   // ── HOME TAB ──
   const meetValRule   = SpreadsheetApp.newDataValidation().requireValueInRange(sched.getRange("A2:A50")).build();
-  const genderValRule = SpreadsheetApp.newDataValidation().requireValueInList(['Girls', 'Boys']).build();
+  const genderValRule = SpreadsheetApp.newDataValidation().requireValueInList(['Girls', 'Boys', 'Combined']).build();
 
   const home = getOrCreateSheet(ss, 'Home');
   home.clear();
@@ -419,17 +434,32 @@ function generateLineupReport() {
 
   if (!meetNum || !gender) {
     SpreadsheetApp.getUi().alert("Please select a Meet # and Gender on the Home tab first.");
-    return;
+    return false;
   }
 
   const schedData  = ss.getSheetByName("Schedule").getDataRange().getValues();
   const entryData  = ss.getSheetByName("Data_Entry").getDataRange().getValues();
   const rosterData = ss.getSheetByName("Roster").getDataRange().getValues();
   const meetRow    = schedData.find(r => r[0] == meetNum);
+  if (!meetRow) {
+    SpreadsheetApp.getUi().alert("Meet #" + meetNum + " not found in Schedule.");
+    return false;
+  }
+  const meetType   = getMeetType(meetRow);
+  const eventList  = getMeetEventList(meetType);
+  const isCombined = isCombinedGenderSelection(gender);
+  const genderLabel = getOutputGenderLabel(gender);
   const meetName   = (meetRow?.[6] || "MEET").toUpperCase();
+  const meetDateDisplay = formatMeetDateForTitle(meetRow?.[1]);
+  const titlePrefix = meetDateDisplay ? (meetName + " — " + meetDateDisplay) : meetName;
+
+  if (isCombined && meetType !== '8th Grade Pentathlon') {
+    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon. Select Girls or Boys for other meet types.');
+    return false;
+  }
 
   // Validate that all athlete names exist in Roster
-  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, gender);
+  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, isCombined ? '' : gender);
   if (unmatchedNames.length > 0) {
     SpreadsheetApp.getUi().alert(
       '❌ Athletes Not Found in Roster',
@@ -438,11 +468,13 @@ function generateLineupReport() {
       'Please add them to the Roster tab first (using the exact Display Name), then regenerate.',
       SpreadsheetApp.getUi().ButtonSet.OK
     );
-    return;
+    return false;
   }
 
   // Check for athletes with >4 events
-  const overLimit = checkAthleteEventCount(entryData, meetNum, gender);
+  const overLimit = meetType === '8th Grade Pentathlon'
+    ? []
+    : checkAthleteEventCount(entryData, meetNum, isCombined ? '' : gender);
   if (overLimit.length > 0) {
     const warnings = overLimit.map(a => 
       '⚠️ ' + a.name + ': ' + a.count + ' events (' + a.events.join(', ') + ')'
@@ -455,7 +487,7 @@ function generateLineupReport() {
       SpreadsheetApp.getUi().ButtonSet.YES_NO
     );
     if (response !== SpreadsheetApp.getUi().Button.YES) {
-      return;
+      return false;
     }
   }
 
@@ -467,7 +499,7 @@ function generateLineupReport() {
 
   // Title row
   sheet.getRange("A1:E1").merge()
-    .setValue(meetName + " — LINEUP (" + gender + ")")
+    .setValue(titlePrefix + " — LINEUP (" + genderLabel + ")")
     .setFontWeight("bold").setFontSize(16)
     .setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBackground("#000000").setFontColor("white");
@@ -477,10 +509,10 @@ function generateLineupReport() {
 
   // Layout: first 5 track events → left col, next 4 track events → right col,
   // field events sync to bottom of both cols then alternate left/right.
-  const TRACK_COUNT = 9; // PRINT_EVT indices 0–8 are track
-  const HALF_TRACK  = 5; // first half in left column
+  const TRACK_COUNT = getTrackEventCount(eventList);
+  const HALF_TRACK  = Math.ceil(TRACK_COUNT / 2);
 
-  PRINT_EVT.forEach((ev, i) => {
+  eventList.forEach((ev, i) => {
     // At the transition to field events, sync both columns to the same row
     // so field events start aligned. (Page breaks must be set manually in
     // File → Print → page break settings — GAS has no API for this.)
@@ -495,7 +527,7 @@ function generateLineupReport() {
     const col    = isLeft ? 1 : 4;
     let   row    = isLeft ? curL : curR;
 
-    const aths = entryData.filter(r => r[0] == meetNum && r[1] == gender && r[2] == ev);
+    const aths = entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && r[2] == ev);
     const startRow = row;
 
     // Event header
@@ -594,7 +626,7 @@ function generateLineupReport() {
   
   // Title row for By-Athlete view
   sheet.getRange(byAthleteStart, 1, 1, 5).merge()
-    .setValue(meetName + " — LINEUP BY ATHLETE (" + gender + ")")
+    .setValue(titlePrefix + " — LINEUP BY ATHLETE (" + genderLabel + ")")
     .setFontWeight("bold").setFontSize(16)
     .setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBackground("#000000").setFontColor("white");
@@ -603,7 +635,7 @@ function generateLineupReport() {
   // Collect all athletes and their events from entryData
   const athleteEvents = {}; // Map: athleteName -> [eventStrings]
   
-  entryData.filter(r => r[0] == meetNum && r[1] == gender).forEach(r => {
+  entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && eventList.includes(r[2])).forEach(r => {
     const name = r[3];
     const event = r[2];
     const teamId = r[4];
@@ -622,7 +654,7 @@ function generateLineupReport() {
     }
     if (isRelayEvent(event) && teamId) {
       const teamMembers = entryData.filter(
-        m => m[0] == meetNum && m[1] == gender && m[2] == event && m[4] == teamId
+        m => m[0] == meetNum && matchesSelectedGender(m[1], gender) && m[2] == event && m[4] == teamId
       );
       const legNum = teamMembers.findIndex(m => m[3] === name) + 1;
       eventText += " (Team " + teamId + ", Leg " + legNum + ")";
@@ -675,7 +707,7 @@ function generateLineupReport() {
   
   // Title row
   sheet.getRange(confLineupStart, 1, 1, 5).merge()
-    .setValue(meetName + " — CONFERENCE LINEUP (" + gender + ")")
+    .setValue(titlePrefix + " — CONFERENCE LINEUP (" + genderLabel + ")")
     .setFontWeight("bold").setFontSize(16)
     .setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBackground("#1c4587").setFontColor("white");
@@ -684,8 +716,8 @@ function generateLineupReport() {
   let confRow = confLineupStart + 2;
   
   // Loop through each event and list athletes in conference format
-  PRINT_EVT.forEach(ev => {
-    const eventAthletes = entryData.filter(r => r[0] == meetNum && r[1] == gender && r[2] == ev);
+  eventList.forEach(ev => {
+    const eventAthletes = entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && r[2] == ev);
     
     if (eventAthletes.length === 0) return; // skip events with no entries
     
@@ -790,6 +822,8 @@ function generateLineupReport() {
     
     confRow++; // blank line between events
   });
+
+  return true;
 }
 
 // ── 3. EVENT FORM REPORT ──────────────────────────────────────
@@ -803,16 +837,39 @@ function generateEventFormReport() {
 
   if (!meetNum || !gender) {
     SpreadsheetApp.getUi().alert("Please select a Meet # and Gender on the Home tab first.");
-    return;
+    return false;
   }
 
   const schedData   = ss.getSheetByName("Schedule").getDataRange().getValues();
   const entryData   = ss.getSheetByName("Data_Entry").getDataRange().getValues();
   const recordsData = ss.getSheetByName("School_Records").getDataRange().getValues();
   const rosterData  = ss.getSheetByName("Roster").getDataRange().getValues();
+  const meetRow     = schedData.find(r => r[0] == meetNum);
+
+  if (!meetRow) {
+    try {
+      SpreadsheetApp.getUi().alert("Meet #" + meetNum + " not found in Schedule.");
+    } catch(err) {
+      SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Home')
+        .getRange("A8:B8").merge()
+        .setValue("❌  Meet #" + meetNum + " not found in Schedule.")
+        .setBackground("#ea9999").setFontColor("#990000").setFontWeight("bold");
+    }
+    return false;
+  }
+
+  const meetType    = getMeetType(meetRow);
+  const eventList   = getMeetEventList(meetType);
+  const isCombined  = isCombinedGenderSelection(gender);
+  const genderLabel = getOutputGenderLabel(gender);
+
+  if (isCombined && meetType !== '8th Grade Pentathlon') {
+    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon. Select Girls or Boys for other meet types.');
+    return false;
+  }
 
   // Validate that all athlete names exist in Roster
-  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, gender);
+  const unmatchedNames = validateRosterNames(entryData, rosterData, meetNum, isCombined ? '' : gender);
   if (unmatchedNames.length > 0) {
     SpreadsheetApp.getUi().alert(
       '❌ Athletes Not Found in Roster',
@@ -821,11 +878,13 @@ function generateEventFormReport() {
       'Please add them to the Roster tab first (using the exact Display Name), then regenerate.',
       SpreadsheetApp.getUi().ButtonSet.OK
     );
-    return;
+    return false;
   }
 
   // Check for athletes with >4 events
-  const overLimit = checkAthleteEventCount(entryData, meetNum, gender);
+  const overLimit = meetType === '8th Grade Pentathlon'
+    ? []
+    : checkAthleteEventCount(entryData, meetNum, isCombined ? '' : gender);
   if (overLimit.length > 0) {
     const warnings = overLimit.map(a => 
       '⚠️ ' + a.name + ': ' + a.count + ' events (' + a.events.join(', ') + ')'
@@ -838,25 +897,14 @@ function generateEventFormReport() {
       SpreadsheetApp.getUi().ButtonSet.YES_NO
     );
     if (response !== SpreadsheetApp.getUi().Button.YES) {
-      return;
+      return false;
     }
-  }
-
-  const meetRow  = schedData.find(r => r[0] == meetNum);
-  if (!meetRow) {
-    try {
-      SpreadsheetApp.getUi().alert("Meet #" + meetNum + " not found in Schedule.");
-    } catch(err) {
-      SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Home')
-        .getRange("A8:B8").merge()
-        .setValue("❌  Meet #" + meetNum + " not found in Schedule.")
-        .setBackground("#ea9999").setFontColor("#990000").setFontWeight("bold");
-    }
-    return;
   }
 
   const meetName    = (meetRow[6] || "MEET").toUpperCase();
-  const standing    = (gender === "Boys") ? meetRow[7] : meetRow[8];
+  const meetDateDisplay = formatMeetDateForTitle(meetRow[1]);
+  const titlePrefix = meetDateDisplay ? (meetName + " — " + meetDateDisplay) : meetName;
+  const standing    = isCombined ? '' : ((gender === "Boys") ? meetRow[7] : meetRow[8]);
   const standingStr = standing ? " | STANDING: " + standing : "";
 
   sheet.clear();
@@ -867,7 +915,7 @@ function generateEventFormReport() {
 
   // Title row
   sheet.getRange("A1:E1").merge()
-    .setValue(meetName + standingStr + " (" + gender + ")")
+    .setValue(titlePrefix + standingStr + " (" + genderLabel + ")")
     .setFontWeight("bold").setFontSize(16)
     .setHorizontalAlignment("center").setVerticalAlignment("middle")
     .setBackground("#1c4587").setFontColor("white");
@@ -885,9 +933,9 @@ function generateEventFormReport() {
 
   // Layout: first 5 track events → left col, next 4 track events → right col,
   // field events sync to bottom of both cols then alternate left/right.
-  const TRACK_COUNT = 9; // PRINT_EVT indices 0–8 are track
-  const HALF_TRACK  = 5; // first half in left column
-  PRINT_EVT.forEach((ev, i) => {
+  const TRACK_COUNT = getTrackEventCount(eventList);
+  const HALF_TRACK  = Math.ceil(TRACK_COUNT / 2);
+  eventList.forEach((ev, i) => {
     // At the transition to field events, sync both columns to the same row
     // so field events start aligned. (Page breaks must be set manually in
     // File → Print → page break settings — GAS has no API for this.)
@@ -903,8 +951,8 @@ function generateEventFormReport() {
     let   row    = isLeft ? curL : curR;
 
     const startRow  = row;
-    const schoolRec = formatCellValue(recordsData.find(r => r[0] == gender && r[1] == ev)?.[3]) || null;
-    const aths      = entryData.filter(r => r[0] == meetNum && r[1] == gender && r[2] == ev);
+    const schoolRec = isCombined ? null : (formatCellValue(recordsData.find(r => r[0] == gender && r[1] == ev)?.[3]) || null);
+    const aths      = entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && r[2] == ev);
 
     // Event header
     sheet.getRange(row, col, 1, 2)
@@ -949,6 +997,381 @@ function generateEventFormReport() {
 
     if (isLeft) curL = row + 1; else curR = row + 1;
   });
+
+  return true;
+}
+
+// ── PDF EXPORTS ──────────────────────────────────────────────
+
+function saveLineupPdf() {
+  saveReportPdf('Lineup_View', 'Lineup');
+}
+
+function saveEventFormsPdf() {
+  saveReportPdf('Event_Form_Printable', 'EventForms');
+}
+
+function saveReportPdf(sheetName, reportLabel) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const home = ss.getSheetByName('Home');
+  const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
+  const sheet = ss.getSheetByName(sheetName);
+
+  if (!ensureDriveAuthorization(ui)) return;
+
+  const exportMode = promptPdfExportMode(ui, reportLabel);
+  if (exportMode === 'cancel') return;
+
+  // Optional regenerate from current Home selections (useful to avoid stale tabs).
+  if (exportMode === 'regenerate') {
+    let generated = true;
+    if (sheetName === 'Lineup_View') generated = generateLineupReport();
+    if (sheetName === 'Event_Form_Printable') generated = generateEventFormReport();
+    if (!generated) {
+      ui.alert('PDF not saved because report generation did not complete. Fix selections/data and try again.');
+      return;
+    }
+  }
+
+  if (exportMode === 'as-is') {
+    const proceed = ui.alert(
+      'Export Current Tab As-Is?',
+      'This will export the existing tab exactly as currently shown, including manual page-break setup and any stale data.',
+      ui.ButtonSet.YES_NO
+    );
+    if (proceed !== ui.Button.YES) {
+      return;
+    }
+  }
+
+  if (!sheet) {
+    ui.alert('Sheet "' + sheetName + '" was not found.');
+    return;
+  }
+
+  const meetNum = home.getRange('B3').getValue();
+  const gender = home.getRange('B4').getValue();
+  if (!meetNum || !gender) {
+    ui.alert('Please select a Meet # and Gender on the Home tab first.');
+    return;
+  }
+
+  const meetRow = schedData.find(r => r[0] == meetNum);
+  if (!meetRow) {
+    ui.alert('Meet #' + meetNum + ' not found in Schedule.');
+    return;
+  }
+
+  const folder = resolvePdfFolder(ui);
+  if (!folder) return; // canceled or invalid
+
+  const meetDate = formatMeetDateForFileName(meetRow[1]);
+  const meetName = sanitizeFilePart((meetRow[6] || 'Meet').toString());
+  const genderLabel = sanitizeFilePart(getOutputGenderLabel(gender));
+  const suffix = promptPdfSuffix(ui, reportLabel);
+  if (suffix === null) return; // canceled
+  const fileName = meetDate + '_' + genderLabel + '_' + meetName + '_' + reportLabel + suffix + '.pdf';
+
+  const url = 'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export' +
+    '?format=pdf' +
+    '&gid=' + sheet.getSheetId() +
+    '&size=letter' +
+    '&portrait=true' +
+    '&fitw=true' +
+    '&sheetnames=false' +
+    '&printtitle=false' +
+    '&pagenumbers=false' +
+    '&gridlines=false' +
+    '&fzr=true';
+
+  const params = {
+    method: 'get',
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    muteHttpExceptions: true
+  };
+
+  const response = UrlFetchApp.fetch(url, params);
+  if (response.getResponseCode() !== 200) {
+    ui.alert('PDF export failed (HTTP ' + response.getResponseCode() + '). Try again.');
+    return;
+  }
+
+  try {
+    const file = folder.createFile(response.getBlob().setName(fileName));
+    ui.alert('✅ PDF Saved', 'Saved to: ' + folder.getName() + '\nFile: ' + file.getName(), ui.ButtonSet.OK);
+  } catch (err) {
+    ui.alert(
+      'Could Not Save PDF',
+      'Drive write failed. This is usually a permissions/authorization issue.\n\n' +
+      'Run menu item: "11. Check Drive Access (PDF debug)" and follow the prompt.\n\n' +
+      'Details: ' + (err && err.message ? err.message : err),
+      ui.ButtonSet.OK
+    );
+  }
+}
+
+function promptPdfExportMode(ui, reportLabel) {
+  const resp = ui.alert(
+    'Save ' + reportLabel + ' PDF',
+    'Choose export behavior:\n\n' +
+    'YES = Regenerate report first using current Home Meet/Gender\n' +
+    'NO = Use current tab as-is (preserves manual page-break tuning)\n' +
+    'CANCEL = Stop',
+    ui.ButtonSet.YES_NO_CANCEL
+  );
+
+  if (resp === ui.Button.YES) return 'regenerate';
+  if (resp === ui.Button.NO) return 'as-is';
+  return 'cancel';
+}
+
+function ensureDriveAuthorization(ui) {
+  try {
+    const info = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL, [DRIVE_WRITE_SCOPE]);
+    if (info.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED) {
+      const authUrl = info.getAuthorizationUrl();
+      showDriveAuthorizationDialog(authUrl);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    ui.alert(
+      'Authorization Check Failed',
+      'Could not verify script authorization state.\n\n' +
+      'Try running "11. Check Drive Access (PDF debug)" from the menu, then approve permissions.\n\n' +
+      'Details: ' + (err && err.message ? err.message : err),
+      ui.ButtonSet.OK
+    );
+    return false;
+  }
+}
+
+function showDriveAuthorizationDialog(authUrl) {
+  const hasAuthUrl = authUrl && /^https:\/\//i.test(authUrl);
+  const safeUrl = hasAuthUrl ? authUrl.replace(/"/g, '&quot;') : '';
+  const html = HtmlService.createHtmlOutput(
+    '<div style="font-family:Arial,sans-serif;padding:12px;line-height:1.45;">' +
+      '<h3 style="margin:0 0 10px 0;">Drive Authorization Required</h3>' +
+      '<p style="margin:0 0 10px 0;">This spreadsheet has not been granted Drive access yet.</p>' +
+      (hasAuthUrl
+        ? '<p style="margin:0 0 8px 0;">1) Open this link now (it can expire):</p>' +
+          '<p style="margin:0 0 10px 0;"><a href="' + safeUrl + '" target="_blank">Open Google Authorization Link</a></p>' +
+          '<p style="margin:0 0 6px 0;">If needed, click in the box below to auto-select, then copy:</p>' +
+          '<textarea readonly onclick="this.select();" style="width:100%;height:72px;font-size:12px;">' + safeUrl + '</textarea>'
+        : '<p style="margin:0 0 10px 0;">No direct authorization link was returned for this run.</p>') +
+      '<p style="margin:10px 0 0 0;">2) Approve permissions</p>' +
+      '<p style="margin:4px 0 0 0;">3) Return to the sheet and run PDF export again</p>' +
+      '<p style="margin:10px 0 0 0;color:#666;">If the link shows 404, rerun Check Drive Access for a fresh link, or run authorizeDriveAccess in the Apps Script editor.</p>' +
+    '</div>'
+  ).setWidth(560).setHeight(420);
+
+  SpreadsheetApp.getUi().showModalDialog(html, 'Drive Authorization Required');
+}
+
+function authorizeDriveAccess() {
+  // Run once from Apps Script editor to force OAuth consent for Drive scope.
+  const rootId = DriveApp.getRootFolder().getId();
+  Logger.log('Drive authorization OK. Root folder ID: ' + rootId);
+  return 'Drive authorization successful.';
+}
+
+function resolvePdfFolder(ui) {
+  const props = PropertiesService.getDocumentProperties();
+  const savedFolderId = props.getProperty(PDF_FOLDER_PROP_KEY);
+  const promptText =
+    'Where should PDFs be saved? Paste ONE of these:\n' +
+    '1) Full Google Drive folder URL\n' +
+    '2) Folder ID only (long string from the URL)\n\n' +
+    'Examples:\n' +
+    'URL: https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz\n' +
+    'ID:  1AbCdEfGhIjKlMnOpQrStUvWxYz\n\n' +
+    'Leave blank to use saved default.\n' +
+    (savedFolderId ? 'Saved default found.' : 'No default saved yet.');
+
+  const resp = ui.prompt('PDF Export Folder', promptText, ui.ButtonSet.OK_CANCEL);
+  if (resp.getSelectedButton() !== ui.Button.OK) return null;
+
+  const raw = resp.getResponseText().trim();
+  let folderId = '';
+  if (!raw) {
+    folderId = savedFolderId || '';
+  } else {
+    folderId = extractDriveFolderId(raw);
+  }
+
+  if (!folderId) {
+    ui.alert('No folder provided. Paste a Drive folder URL or folder ID, or save a default first.');
+    return null;
+  }
+
+  try {
+    const folder = DriveApp.getFolderById(folderId);
+    props.setProperty(PDF_FOLDER_PROP_KEY, folderId);
+    return folder;
+  } catch (err) {
+    const response = ui.alert(
+      'Could Not Access Folder',
+      'That folder ID/URL could not be opened by this spreadsheet account.\n\n' +
+      'Common reasons:\n' +
+      '1) Wrong account is signed in\n' +
+      '2) Folder is not shared with this account\n' +
+      '3) The pasted link was not a folder link\n\n' +
+      'Create/use a "FinishLine PDF Exports" folder in your My Drive instead?',
+      ui.ButtonSet.YES_NO
+    );
+
+    if (response !== ui.Button.YES) return null;
+
+    try {
+      const fallback = getOrCreatePdfFallbackFolder();
+      props.setProperty(PDF_FOLDER_PROP_KEY, fallback.getId());
+      ui.alert('Using My Drive Folder', 'PDFs will save to: ' + fallback.getName(), ui.ButtonSet.OK);
+      return fallback;
+    } catch (fallbackErr) {
+      ui.alert(
+        'Could Not Create Fallback Folder',
+        'My Drive fallback also failed. This usually means the script has not been granted Drive permission yet.\n\n' +
+        'Run menu item: "11. Check Drive Access (PDF debug)" and approve access.\n\n' +
+        'Details: ' + (fallbackErr && fallbackErr.message ? fallbackErr.message : fallbackErr),
+        ui.ButtonSet.OK
+      );
+      return null;
+    }
+  }
+}
+
+function checkDriveAccess() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const home = ss.getSheetByName('Home');
+  const statusCell = home ? home.getRange(HOME_STATUS_CELL) : null;
+
+  if (statusCell) {
+    statusCell.merge()
+      .setValue('⏳ Checking Drive access...')
+      .setBackground('#fff2cc').setFontColor('#7f6000').setFontWeight('bold');
+    SpreadsheetApp.flush();
+  }
+  ss.toast('Checking Drive access...', 'FINISH LINE', 3);
+
+  if (!ensureDriveAuthorization(ui)) {
+    if (statusCell) {
+      statusCell
+        .setValue('⚠️ Drive auth required — use the approval link in popup')
+        .setBackground('#fff2cc').setFontColor('#7f6000').setFontWeight('bold');
+      SpreadsheetApp.flush();
+    }
+    ss.toast('Drive authorization required', 'FINISH LINE', 6);
+    return;
+  }
+
+  try {
+    const rootName = DriveApp.getRootFolder().getName();
+    if (statusCell) {
+      statusCell
+        .setValue('✅ Drive access OK (' + rootName + ')')
+        .setBackground('#d9ead3').setFontColor('#274e13').setFontWeight('bold');
+      SpreadsheetApp.flush();
+    }
+    ss.toast('Drive access OK', 'FINISH LINE', 4);
+    ui.alert(
+      '✅ Drive Access OK',
+      'Drive API access is authorized for this script. Root folder: ' + rootName,
+      ui.ButtonSet.OK
+    );
+  } catch (err) {
+    const errMsg = (err && err.message ? err.message : String(err));
+    if (statusCell) {
+      statusCell
+        .setValue('❌ Drive access failed — run checkDriveAccess in Apps Script editor')
+        .setBackground('#f4cccc').setFontColor('#990000').setFontWeight('bold');
+      SpreadsheetApp.flush();
+    }
+    ss.toast('Drive access failed', 'FINISH LINE', 6);
+    ui.alert(
+      '⚠️ Drive Access Not Authorized',
+      'This script cannot access Drive yet.\n\n' +
+      'Fix:\n' +
+      '1) Open Extensions -> Apps Script\n' +
+      '2) Select function "checkDriveAccess"\n' +
+      '3) Click Run\n' +
+      '4) Complete the Google permission dialog and allow Drive access\n' +
+      '5) Return to the sheet and try PDF export again\n\n' +
+      'Details: ' + errMsg,
+      ui.ButtonSet.OK
+    );
+  }
+}
+
+function getOrCreatePdfFallbackFolder() {
+  const folderName = 'FinishLine PDF Exports';
+  const existing = DriveApp.getFoldersByName(folderName);
+  if (existing.hasNext()) return existing.next();
+  return DriveApp.createFolder(folderName);
+}
+
+function promptPdfSuffix(ui, reportLabel) {
+  const mode = ui.alert(
+    'PDF File Suffix (' + reportLabel + ')',
+    'Add a custom suffix to the filename?\n\n' +
+    'YES = enter custom suffix text\n' +
+    'NO = no suffix\n' +
+    'CANCEL = stop export',
+    ui.ButtonSet.YES_NO_CANCEL
+  );
+
+  if (mode === ui.Button.CANCEL) return null;
+  if (mode === ui.Button.NO) return '';
+
+  const resp = ui.prompt(
+    'Custom Suffix',
+    'Enter suffix text (examples: prelim, finals_heat2, weather-delay).\n' +
+    'It will be sanitized for file names automatically.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return null;
+
+  const raw = (resp.getResponseText() || '').toString().trim();
+  if (!raw) return '';
+
+  let cleaned = sanitizeFilePart(raw);
+  if (!cleaned) return '';
+  if (!cleaned.startsWith('_')) cleaned = '_' + cleaned;
+  return cleaned;
+}
+
+function extractDriveFolderId(input) {
+  const trimmed = (input || '').toString().trim();
+  const folderPathMatch = trimmed.match(/\/folders\/([\w-]+)/i);
+  if (folderPathMatch && folderPathMatch[1]) return folderPathMatch[1];
+  const idMatch = trimmed.match(/[-\w]{25,}/);
+  return idMatch ? idMatch[0] : '';
+}
+
+function sanitizeFilePart(val) {
+  return (val || '')
+    .toString()
+    .trim()
+    .replace(/[\\/:*?"<>|#\[\]]+/g, '')
+    .replace(/\s+/g, '_');
+}
+
+function formatMeetDateForFileName(meetDateVal) {
+  if (meetDateVal instanceof Date) {
+    return Utilities.formatDate(meetDateVal, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  }
+  const s = (meetDateVal || '').toString().trim();
+  if (!s) return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return sanitizeFilePart(s);
+}
+
+function formatMeetDateForTitle(meetDateVal) {
+  if (!meetDateVal) return '';
+  if (meetDateVal instanceof Date) {
+    return Utilities.formatDate(meetDateVal, Session.getScriptTimeZone(), 'M/d/yyyy');
+  }
+  return meetDateVal.toString().trim();
 }
 
 // ── RENDER HELPERS ────────────────────────────────────────────
@@ -1254,6 +1677,38 @@ function formatConferenceNames(athleteNames) {
 function isNoMark(val) {
   if (!val) return false;
   return /^(-|dnr|dns|dq|nh|nm|nd|scratch|x|na|cancell?ed)$/i.test(val.toString().trim());
+}
+
+function isCombinedGenderSelection(gender) {
+  return (gender || '').toString().trim().toLowerCase() === 'combined';
+}
+
+function matchesSelectedGender(rowGender, selectedGender) {
+  if (isCombinedGenderSelection(selectedGender)) return true;
+  return rowGender == selectedGender;
+}
+
+function getOutputGenderLabel(gender) {
+  return isCombinedGenderSelection(gender) ? 'Girls + Boys' : gender;
+}
+
+function getMeetType(meetRow) {
+  return (meetRow?.[3] || '').toString().trim();
+}
+
+function getMeetEventList(meetType) {
+  if (meetType === 'Relays') return RELAY_MEET_EVT;
+  if (meetType === '8th Grade Pentathlon') return PENTATHLON_EVT;
+  return PRINT_EVT;
+}
+
+function isFieldEvent(ev) {
+  return ev.includes('Jump') || ev.includes('Put') || ev.includes('Discus');
+}
+
+function getTrackEventCount(eventList) {
+  const fieldStartIdx = eventList.findIndex(isFieldEvent);
+  return fieldStartIdx >= 0 ? fieldStartIdx : eventList.length;
 }
 
 function isRelayEvent(ev) {
@@ -1849,6 +2304,13 @@ function findAndUpdatePRs() {
     statusCell.setValue("⚠️ Select Meet # and Gender first").setBackground("#f4cccc").setFontColor("#990000");
     SpreadsheetApp.flush();
     ui.alert('❌ Missing Selection', 'Please select Meet # and Gender on the Home tab.', ui.ButtonSet.OK);
+    return;
+  }
+
+  if (isCombinedGenderSelection(gender)) {
+    statusCell.setValue("⚠️ Combined not supported for PR updates").setBackground("#fff2cc").setFontColor("#7f6000");
+    SpreadsheetApp.flush();
+    ui.alert('❌ Unsupported Selection', 'PR updates require a single gender selection. Choose Girls or Boys on the Home tab.', ui.ButtonSet.OK);
     return;
   }
 
