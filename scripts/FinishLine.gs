@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.55";
+const VERSION = "v2.60";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -88,9 +88,10 @@ function onOpen() {
     .addItem('7. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
     .addItem('8. Generate Filtered Results',      'generateFilteredResults')
     .addSeparator()
-    .addItem('9. Check PR Setup (debug)',         'checkPRSetup')
-    .addItem('10. Check Meet Roster (debug)',     'checkMeetRoster')
-    .addItem('11. Check Drive Access (PDF debug)',    'checkDriveAccess')
+    .addItem('9. Build Time-Trial List (100M)',   'buildTimeTrialRelayList')
+    .addItem('10. Check PR Setup (debug)',        'checkPRSetup')
+    .addItem('11. Check Meet Roster (debug)',     'checkMeetRoster')
+    .addItem('12. Check Drive Access (PDF debug)', 'checkDriveAccess')
     .addToUi();
 }
 
@@ -859,6 +860,7 @@ function generateEventFormReport() {
   }
 
   const meetType    = getMeetType(meetRow);
+  const isRelayMeet = meetType === 'Relays';
   const eventList   = getMeetEventList(meetType);
   const isCombined  = isCombinedGenderSelection(gender);
   const genderLabel = getOutputGenderLabel(gender);
@@ -968,6 +970,10 @@ function generateEventFormReport() {
 
     if (isRelayEvent(ev)) {
       row = renderRelayBlock(sheet, aths, row, col, schoolRec, ev);
+    } else if (isRelayMeet && isAttemptEvent(ev)) {
+      row = renderRelayFieldAttemptBlock(sheet, aths, row, col, schoolRec, ev);
+    } else if (isRelayMeet) {
+      row = renderRelayFieldStandardBlock(sheet, aths, row, col, schoolRec, ev);
     } else if (isSplitEvent(ev)) {
       row = renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isAttemptEvent(ev)) {
@@ -976,23 +982,27 @@ function generateEventFormReport() {
       row = renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     }
 
-    // Add blank rows for at-meet additions (write-ins)
-    // 4 lines for relays, 2 lines for all other events
-    const additionCount = isRelayEvent(ev) ? 4 : 2;
-    
-    sheet.getRange(row, col, 1, 2)
-      .setValues([["─ At-Meet Additions ─", ""]])
-      .setBackground("#f3f3f3").setFontStyle("italic").setFontSize(8).setFontColor("#666666")
-      .setBorder(true, true, true, true, true, null);
-    row++;
-    
-    // Dynamic number of blank write-in rows
-    for (let i = 0; i < additionCount; i++) {
+    // Add blank rows for at-meet additions (write-ins) only when enabled for this meet type.
+    const suppressWriteInsForMeetType =
+      meetType === 'Invitational' ||
+      meetType === 'Relays' ||
+      meetType === 'Championship';
+    if (!suppressWriteInsForMeetType) {
+      const additionCount = 2;
+
       sheet.getRange(row, col, 1, 2)
-        .setValues([["", ""]])
-        .setBackground("#ffffff")
+        .setValues([["─ At-Meet Additions ─", ""]])
+        .setBackground("#f3f3f3").setFontStyle("italic").setFontSize(8).setFontColor("#666666")
         .setBorder(true, true, true, true, true, null);
       row++;
+
+      for (let i = 0; i < additionCount; i++) {
+        sheet.getRange(row, col, 1, 2)
+          .setValues([["", ""]])
+          .setBackground("#ffffff")
+          .setBorder(true, true, true, true, true, null);
+        row++;
+      }
     }
 
     if (isLeft) curL = row + 1; else curR = row + 1;
@@ -1450,6 +1460,79 @@ function renderRelayBlock(sheet, aths, row, col, schoolRec, ev) {
     totalRange.setValues([["TEAM " + tId + " TOTAL", res + plTag]])
       .setBackground("#eeeeee").setFontWeight("bold")
       .setBorder(true, true, true, true, true, null);
+    if (res && !isNoMark(res) && schoolRec && isBetter(res, schoolRec, ev)) {
+      totalRange.setBackground("#ffe599");
+      sheet.getRange(row, col + 1).setNote("🏆 School Record!");
+    }
+    row++;
+  });
+  return row;
+}
+
+/** Relay-meet field event (non-attempt) — grouped by team ID with a team total row */
+function renderRelayFieldStandardBlock(sheet, aths, row, col, schoolRec, ev) {
+  const teams = [...new Set(aths.map(a => a[4] || "1"))];
+  teams.forEach(tId => {
+    const members = aths.filter(a => a[4] == tId);
+    members.forEach((m, idx) => {
+      const athleteRes = formatCellValue(m[5]) || "";
+      sheet.getRange(row, col, 1, 2)
+        .setValues([[(idx + 1) + ". " + m[3], athleteRes]])
+        .setBorder(true, true, true, true, true, null);
+      row++;
+    });
+
+    const lead = members.find(m => m[5]) || members[0];
+    const res = lead ? formatCellValue(lead[5]) : "";
+    const place = lead ? lead[8] : "";
+    const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const totalRange = sheet.getRange(row, col, 1, 2);
+    totalRange.setValues([["TEAM " + tId + " TOTAL", res + plTag]])
+      .setBackground("#eeeeee").setFontWeight("bold")
+      .setBorder(true, true, true, true, true, null);
+
+    if (res && !isNoMark(res) && schoolRec && isBetter(res, schoolRec, ev)) {
+      totalRange.setBackground("#ffe599");
+      sheet.getRange(row, col + 1).setNote("🏆 School Record!");
+    }
+    row++;
+  });
+  return row;
+}
+
+/** Relay-meet attempt event — grouped by team ID with 3 attempts and a team total row */
+function renderRelayFieldAttemptBlock(sheet, aths, row, col, schoolRec, ev) {
+  const teams = [...new Set(aths.map(a => a[4] || "1"))];
+  teams.forEach(tId => {
+    const members = aths.filter(a => a[4] == tId);
+    members.forEach((m, idx) => {
+      const athleteRes = formatCellValue(m[5]) || "";
+      const attempts = m[6] ? m[6].toString().split(",").map(s => s.trim()) : [];
+
+      sheet.getRange(row, col, 1, 2)
+        .setValues([[(idx + 1) + ". " + m[3], athleteRes]])
+        .setFontWeight("bold")
+        .setBorder(true, true, true, true, true, null);
+      row++;
+
+      for (let att = 0; att < 3; att++) {
+        sheet.getRange(row, col, 1, 2)
+          .setValues([["   ↳ Attempt " + (att + 1), attempts[att] || ""]])
+          .setFontSize(8).setFontStyle("italic").setFontColor("#555555")
+          .setBorder(true, true, true, true, true, null);
+        row++;
+      }
+    });
+
+    const lead = members.find(m => m[5]) || members[0];
+    const res = lead ? formatCellValue(lead[5]) : "";
+    const place = lead ? lead[8] : "";
+    const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const totalRange = sheet.getRange(row, col, 1, 2);
+    totalRange.setValues([["TEAM " + tId + " TOTAL", res + plTag]])
+      .setBackground("#eeeeee").setFontWeight("bold")
+      .setBorder(true, true, true, true, true, null);
+
     if (res && !isNoMark(res) && schoolRec && isBetter(res, schoolRec, ev)) {
       totalRange.setBackground("#ffe599");
       sheet.getRange(row, col + 1).setNote("🏆 School Record!");
@@ -2254,6 +2337,132 @@ function generateFilteredResults() {
   ui.alert(
     '✅ Filtered Results Ready',
     filtered.length + ' row(s) written to Filtered_Results.' + unmatchedMsg,
+    ui.ButtonSet.OK
+  );
+}
+
+/**
+ * Build 100 M Dash entries for an off-the-books time-trial meet by selecting
+ * athletes who are NOT entered in a source meet.
+ *
+ * Writes rows directly to Data_Entry with columns:
+ *   A Meet # (target)
+ *   B Gender
+ *   C Event (fixed: 100 M Dash)
+ *   D Athlete Name (Roster Display Name fallback Athlete Name)
+ *   E Relay Team ID (blank for individual event)
+ *   F-I blank (to be filled after race)
+ */
+function buildTimeTrialRelayList() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const home = ss.getSheetByName('Home');
+  const rosterData = ss.getSheetByName('Roster').getDataRange().getValues();
+  const entrySheet = ss.getSheetByName('Data_Entry');
+  const entryData = entrySheet.getDataRange().getValues();
+
+  const defaultSourceMeet = home ? (home.getRange('B3').getValue() || '') : '';
+  const defaultGender = home ? (home.getRange('B4').getValue() || '') : '';
+
+  const sourceResp = ui.prompt(
+    'Build Time-Trial List (100 M Dash)',
+    'Source meet # to EXCLUDE (main/limited-entry meet):' + (defaultSourceMeet ? ('\nDefault: ' + defaultSourceMeet) : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (sourceResp.getSelectedButton() !== ui.Button.OK) return;
+  const sourceMeet = (sourceResp.getResponseText() || '').toString().trim() || (defaultSourceMeet ? defaultSourceMeet.toString().trim() : '');
+  if (!sourceMeet) {
+    ui.alert('Please provide a source meet # to exclude.');
+    return;
+  }
+
+  const targetResp = ui.prompt(
+    'Build Time-Trial List (100 M Dash)',
+    'Target time-trial meet # (example: 8.1):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (targetResp.getSelectedButton() !== ui.Button.OK) return;
+  const targetMeet = (targetResp.getResponseText() || '').toString().trim();
+  if (!targetMeet) {
+    ui.alert('Please provide a target meet # (example: 8.1).');
+    return;
+  }
+
+  const genderResp = ui.prompt(
+    'Build Time-Trial List (100 M Dash)',
+    'Gender (Girls or Boys):' + (defaultGender ? ('\nDefault: ' + defaultGender) : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (genderResp.getSelectedButton() !== ui.Button.OK) return;
+  let gender = (genderResp.getResponseText() || '').toString().trim() || (defaultGender ? defaultGender.toString().trim() : '');
+  if (!gender) {
+    ui.alert('Please provide Girls or Boys.');
+    return;
+  }
+  gender = /^girls$/i.test(gender) ? 'Girls' : /^boys$/i.test(gender) ? 'Boys' : gender;
+  if (gender !== 'Girls' && gender !== 'Boys') {
+    ui.alert('Gender must be Girls or Boys.');
+    return;
+  }
+
+  const eventName = '100 M Dash';
+
+  const confirmAppend = ui.alert(
+    'Append Rows To Data_Entry?',
+    'This will append generated 100 M Dash rows directly to Data_Entry for Meet #' + targetMeet + ' / ' + gender + '. Continue?',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirmAppend !== ui.Button.YES) return;
+
+  const rosterRows = rosterData.slice(1);
+  const rosterNames = rosterRows
+    .filter(r => (r[2] || '').toString().trim() === gender)
+    .map(r => ((r[1] || '').toString().trim() || (r[0] || '').toString().trim()))
+    .filter(Boolean);
+
+  if (rosterNames.length === 0) {
+    ui.alert('No roster athletes found for ' + gender + '.');
+    return;
+  }
+
+  // Athletes already entered in the source meet (any event) are excluded.
+  const enteredSet = new Set(
+    entryData.slice(1)
+      .filter(r => r[0] == sourceMeet && r[1] == gender && r[3])
+      .map(r => r[3].toString().trim().toLowerCase())
+  );
+
+  const missingAthletes = rosterNames
+    .filter(n => !enteredSet.has(n.toString().trim().toLowerCase()))
+    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+
+  if (missingAthletes.length === 0) {
+    ui.alert('No eligible athletes found. Everyone is already entered in source meet #' + sourceMeet + ' (' + gender + ').');
+    return;
+  }
+
+  const rowsToAppend = [];
+  for (let i = 0; i < missingAthletes.length; i++) {
+    rowsToAppend.push([
+      targetMeet,
+      gender,
+      eventName,
+      missingAthletes[i],
+      '',
+      '',
+      '',
+      'Auto-generated time-trial 100 M Dash list from athletes not in meet #' + sourceMeet,
+      ''
+    ]);
+  }
+
+  const startRow = entrySheet.getLastRow() + 1;
+  entrySheet.getRange(startRow, 1, rowsToAppend.length, 9).setValues(rowsToAppend);
+
+  ui.alert(
+    '✅ Time-Trial Rows Added',
+    rowsToAppend.length + ' entries appended to Data_Entry for Meet #' + targetMeet + ' (' + gender + ')\n' +
+    'Event: ' + eventName,
     ui.ButtonSet.OK
   );
 }
