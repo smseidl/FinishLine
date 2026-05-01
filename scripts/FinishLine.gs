@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.60";
+const VERSION = "v2.66";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -87,11 +87,12 @@ function onOpen() {
     .addItem('6. Generate Top Marks (YTD)',       'generateTopMarks')
     .addItem('7. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
     .addItem('8. Generate Filtered Results',      'generateFilteredResults')
+    .addItem('9. Export Event Placers (Email/AI)', 'generatePlacersExport')
     .addSeparator()
-    .addItem('9. Build Time-Trial List (100M)',   'buildTimeTrialRelayList')
-    .addItem('10. Check PR Setup (debug)',        'checkPRSetup')
-    .addItem('11. Check Meet Roster (debug)',     'checkMeetRoster')
-    .addItem('12. Check Drive Access (PDF debug)', 'checkDriveAccess')
+    .addItem('10. Build Time-Trial List (100M)',  'buildTimeTrialRelayList')
+    .addItem('11. Check PR Setup (debug)',        'checkPRSetup')
+    .addItem('12. Check Meet Roster (debug)',     'checkMeetRoster')
+    .addItem('13. Check Drive Access (PDF debug)', 'checkDriveAccess')
     .addToUi();
 }
 
@@ -170,7 +171,7 @@ function fullInitialize() {
   const sched = getOrCreateSheet(ss, 'Schedule');
   try {
     sched.getRange(1, 1, 1, 9)
-      .setValues([["Meet #", "Date", "Time", "Type", "Location", "Address", "Meet Name", "Boys Standing", "Girls Standing"]])
+      .setValues([["Meet #", "Date", "Time", "Type", "Location", "Address", "Meet Name", "Boys Place/Points", "Girls Place/Points"]])
       .setBackground("#444444").setFontColor("white").setFontWeight("bold");
   } catch(e) {
     if (e.message.includes('typed columns')) {
@@ -190,6 +191,8 @@ function fullInitialize() {
   sched.setColumnWidth(7, 180);
   sched.setColumnWidth(8, 120);
   sched.setColumnWidth(9, 120);
+  sched.getRange('H:I').setNumberFormat('@');
+  sched.getRange('H1:I1').setNote('Enter as place/points, for example: 1/80 or 1st / 80');
   // Type column — drives meet-specific printable event lists
   const typeRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['', 'Regular', 'Dual Meet', 'Invitational', 'Championship', 'Time Trials', 'Relays', '8th Grade Pentathlon', 'Scrimmage'])
@@ -767,9 +770,9 @@ function generateLineupReport() {
         teamGroups[cn.teamId].push(cn);
       });
       
-      Object.keys(teamGroups).sort().forEach(tId => {
+      teams.forEach(tId => {
         const teamMembers = teamGroups[tId];
-        const formattedNames = formatConferenceNamesFromParts(teamMembers);
+        const formattedNames = formatConferenceNamesFromParts(teamMembers, false);
         
         if (formattedNames.length > 0) {
           sheet.getRange(confRow, 1)
@@ -1670,9 +1673,10 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
  * - Default format: "DisplayName L" (display name + last initial)
  * - If multiple athletes have the same "DisplayName L", expand all to full last name
  * - Returns array sorted alphabetically by display name
- * - Handles cases like "MJ Smith" → "MJ S" or "Mary Jane Smith" (goes by MJ) → "MJ S"
+ * - Set sortOutput to false to preserve input order (used for relay legs)
  */
-function formatConferenceNamesFromParts(nameParts) {
+function formatConferenceNamesFromParts(nameParts, sortOutput) {
+  if (sortOutput === undefined) sortOutput = true;
   const parsed = nameParts.map(np => {
     const lastInitial = np.lastName.charAt(0).toUpperCase();
     const shortForm = np.displayName + ' ' + lastInitial;
@@ -1699,10 +1703,13 @@ function formatConferenceNamesFromParts(nameParts) {
     return p.shortForm;
   });
   
-  // Sort alphabetically by display name
-  return formatted.sort((a, b) => {
-    return a.toLowerCase().localeCompare(b.toLowerCase());
-  });
+  // Sort alphabetically unless caller needs original input order preserved.
+  if (sortOutput) {
+    return formatted.sort((a, b) => {
+      return a.toLowerCase().localeCompare(b.toLowerCase());
+    });
+  }
+  return formatted;
 }
 
 /**
@@ -2337,6 +2344,362 @@ function generateFilteredResults() {
   ui.alert(
     '✅ Filtered Results Ready',
     filtered.length + ' row(s) written to Filtered_Results.' + unmatchedMsg,
+    ui.ButtonSet.OK
+  );
+}
+
+/**
+ * Export placed results for a meet into a copy-ready sheet for email/AI use.
+ * Also runs sanity checks for place/mark inconsistencies (for example,
+ * a faster time shown with a worse or missing place than a slower time).
+ */
+function generatePlacersExport() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const home = ss.getSheetByName('Home');
+  const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
+  const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const out = getOrCreateSheet(ss, 'Placers_Export');
+
+  const defaultMeet = home ? (home.getRange('B3').getValue() || '') : '';
+  const defaultGender = home ? (home.getRange('B4').getValue() || '') : '';
+
+  const meetResp = ui.prompt(
+    'Export Event Placers',
+    'Meet # to export:' + (defaultMeet ? ('\nDefault: ' + defaultMeet) : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (meetResp.getSelectedButton() !== ui.Button.OK) return;
+  const meetNum = (meetResp.getResponseText() || '').toString().trim() || (defaultMeet ? defaultMeet.toString().trim() : '');
+  if (!meetNum) {
+    ui.alert('Please provide a Meet #.');
+    return;
+  }
+
+  const genderResp = ui.prompt(
+    'Export Event Placers',
+    'Gender filter: Girls, Boys, or Combined' + (defaultGender ? ('\nDefault: ' + defaultGender) : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (genderResp.getSelectedButton() !== ui.Button.OK) return;
+  let genderFilter = (genderResp.getResponseText() || '').toString().trim() || (defaultGender ? defaultGender.toString().trim() : 'Combined');
+  if (!genderFilter) genderFilter = 'Combined';
+  if (/^all$/i.test(genderFilter)) genderFilter = 'Combined';
+  genderFilter = /^girls$/i.test(genderFilter) ? 'Girls'
+    : /^boys$/i.test(genderFilter) ? 'Boys'
+    : /^combined$/i.test(genderFilter) ? 'Combined'
+    : genderFilter;
+  if (genderFilter !== 'Girls' && genderFilter !== 'Boys' && genderFilter !== 'Combined') {
+    ui.alert('Gender must be Girls, Boys, or Combined.');
+    return;
+  }
+
+  const maxPlaceResp = ui.prompt(
+    'Export Event Placers',
+    'Max place to include (default 6):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (maxPlaceResp.getSelectedButton() !== ui.Button.OK) return;
+  let maxPlace = parseInt((maxPlaceResp.getResponseText() || '').toString().trim() || '6', 10);
+  if (!maxPlace || maxPlace < 1) maxPlace = 3;
+
+  const meetRow = schedData.find(r => r[0] == meetNum);
+  const meetName = (meetRow && meetRow[6]) ? meetRow[6].toString() : ('Meet #' + meetNum);
+  const meetDateDisplay = meetRow ? formatMeetDateForTitle(meetRow[1]) : '';
+
+  const parseStandingSummary = (standingVal) => {
+    const raw = (standingVal === null || standingVal === undefined) ? '' : standingVal.toString().trim();
+    if (!raw) return { place: '', points: '' };
+
+    const toOrdinal = (n) => {
+      const v = parseInt(n, 10);
+      if (!v) return '';
+      const rem100 = v % 100;
+      if (rem100 >= 11 && rem100 <= 13) return v + 'th';
+      const rem10 = v % 10;
+      if (rem10 === 1) return v + 'st';
+      if (rem10 === 2) return v + 'nd';
+      if (rem10 === 3) return v + 'rd';
+      return v + 'th';
+    };
+
+    const parsePlaceToken = (token) => {
+      if (!token) return '';
+      const t = token.toString().trim().toLowerCase();
+      const wordMap = {
+        first: 1,
+        second: 2,
+        third: 3,
+        fourth: 4,
+        fifth: 5,
+        sixth: 6,
+        seventh: 7,
+        eighth: 8,
+        ninth: 9,
+        tenth: 10
+      };
+      if (wordMap[t]) return toOrdinal(wordMap[t]);
+      const m = t.match(/\b(\d+)(st|nd|rd|th)?\b/i);
+      if (!m) return '';
+      return m[2] ? (m[1] + m[2].toLowerCase()) : toOrdinal(m[1]);
+    };
+
+    const parsePointsToken = (token) => {
+      if (!token) return '';
+      const m = token.toString().match(/(\d+(?:\.\d+)?)/);
+      return m ? m[1] : '';
+    };
+
+    // Preferred format: place/points (e.g., 1/80 or 1st / 80)
+    if (raw.includes('/')) {
+      const parts = raw.split('/');
+      const place = parsePlaceToken(parts[0]);
+      const points = parsePointsToken(parts[1]);
+      if (place || points) return { place: place, points: points };
+    }
+
+    const pointsMatch = raw.match(/(\d+(?:\.\d+)?)\s*(pts?|points?)\b/i);
+    const points = pointsMatch ? pointsMatch[1] : '';
+    const place = parsePlaceToken(raw);
+
+    return { place: place, points: points };
+  };
+
+  const boysSummary = parseStandingSummary(meetRow ? meetRow[7] : '');
+  const girlsSummary = parseStandingSummary(meetRow ? meetRow[8] : '');
+
+  const includeGender = (g) => {
+    if (genderFilter === 'Combined') return true;
+    return g === genderFilter;
+  };
+
+  const parsePlace = (v) => {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = parseInt(v.toString().trim(), 10);
+    return isNaN(n) ? null : n;
+  };
+
+  const parseMark = (eventName, rawVal) => {
+    if (rawVal === '' || rawVal === null || rawVal === undefined) return null;
+    let s = rawVal;
+    if (s instanceof Date) s = formatCellValue(s);
+    s = s.toString().trim();
+    if (!s || isNoMark(s)) return null;
+
+    if (s.includes("'")) {
+      const parts = s.split("'");
+      const feet = parseFloat(parts[0]) || 0;
+      const inches = parts[1] ? parseFloat(parts[1].replace('"', '')) || 0 : 0;
+      return (feet * 12) + inches;
+    }
+    if (s.includes(':')) {
+      const parts = s.split(':');
+      return (parseFloat(parts[0]) * 60) + parseFloat(parts[1]);
+    }
+    const parsed = parseFloat(s.replace(/[^\d.]/g, ''));
+    return isNaN(parsed) ? null : parsed;
+  };
+
+  const placedRows = [];
+  const eventBuckets = {}; // key: gender|event -> rows for sanity checks
+
+  entryData.slice(1).forEach(r => {
+    const gender = r[1];
+    const event = r[2];
+    const athlete = r[3];
+    const teamId = r[4];
+    const result = r[5];
+    const splitAttempt = r[6];
+    const placeNum = parsePlace(r[8]);
+
+    if (r[0] != meetNum) return;
+    if (!includeGender(gender)) return;
+    if (!event || !athlete) return;
+
+    // Relay placers export uses team total only (Result/Mark, col F), not leg splits.
+    const displayMark = formatCellValue(result);
+    const normalizedMark = parseMark(event, result);
+
+    const bucketKey = gender + '|' + event;
+    if (!eventBuckets[bucketKey]) eventBuckets[bucketKey] = [];
+    eventBuckets[bucketKey].push({
+      gender: gender,
+      event: event,
+      athlete: athlete,
+      teamId: teamId,
+      placeNum: placeNum,
+      displayMark: displayMark,
+      normalizedMark: normalizedMark
+    });
+
+    if (placeNum === null || placeNum < 1 || placeNum > maxPlace) return;
+    if (!displayMark || isNoMark(displayMark)) return;
+
+    placedRows.push([
+      meetNum,
+      gender,
+      event,
+      athlete,
+      teamId || '',
+      placeNum,
+      displayMark,
+      '',
+      ''
+    ]);
+  });
+
+  placedRows.sort((a, b) => {
+    if (a[1] !== b[1]) return ('' + a[1]).localeCompare('' + b[1]);
+    if (a[2] !== b[2]) return ('' + a[2]).localeCompare('' + b[2]);
+    if (a[5] !== b[5]) return a[5] - b[5];
+    return ('' + a[3]).localeCompare('' + b[3]);
+  });
+
+  const sanityFlags = [];
+  Object.keys(eventBuckets).forEach(key => {
+    const rows = eventBuckets[key].filter(x => x.normalizedMark !== null);
+    if (rows.length < 2) return;
+
+    const placed = rows.filter(x => x.placeNum !== null && x.placeNum > 0);
+    const unplaced = rows.filter(x => x.placeNum === null || x.placeNum <= 0);
+
+    // Compare placed vs placed for impossible ordering.
+    for (let i = 0; i < placed.length; i++) {
+      for (let j = 0; j < placed.length; j++) {
+        if (i === j) continue;
+        const a = placed[i];
+        const b = placed[j];
+        if (isBetter(a.displayMark, b.displayMark, a.event) && a.placeNum > b.placeNum) {
+          sanityFlags.push(
+            a.gender + ' | ' + a.event + ': ' + a.athlete + ' (' + a.displayMark + ', place ' + a.placeNum +
+            ') looks better than ' + b.athlete + ' (' + b.displayMark + ', place ' + b.placeNum + ').'
+          );
+        }
+      }
+    }
+
+    // Compare unplaced vs placed for likely missing place assignments.
+    unplaced.forEach(u => {
+      placed.forEach(p => {
+        if (isBetter(u.displayMark, p.displayMark, u.event)) {
+          sanityFlags.push(
+            u.gender + ' | ' + u.event + ': ' + u.athlete + ' (' + u.displayMark +
+            ') appears better than placed athlete ' + p.athlete + ' (' + p.displayMark + ', place ' + p.placeNum +
+            ') but has no place recorded.'
+          );
+        }
+      });
+    });
+  });
+
+  // De-duplicate identical flags.
+  const uniqueFlags = [...new Set(sanityFlags)];
+
+  // Build AI/email block grouped by gender + event.
+  const grouped = {};
+  placedRows.forEach(r => {
+    const key = r[1] + '|' + r[2];
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(r);
+  });
+
+  const aiLines = [];
+  aiLines.push('Meet: ' + meetName + (meetDateDisplay ? (' (' + meetDateDisplay + ')') : '') + ' | Placers through place ' + maxPlace);
+  aiLines.push('Team Summary:');
+  if (genderFilter === 'Combined' || genderFilter === 'Girls') {
+    aiLines.push('- Girls place: ' + (girlsSummary.place || 'not set') + ' | points: ' + (girlsSummary.points || 'not set'));
+  }
+  if (genderFilter === 'Combined' || genderFilter === 'Boys') {
+    aiLines.push('- Boys place: ' + (boysSummary.place || 'not set') + ' | points: ' + (boysSummary.points || 'not set'));
+  }
+  aiLines.push('');
+
+  Object.keys(grouped).sort().forEach(key => {
+    const rows = grouped[key].sort((a, b) => a[5] - b[5]);
+    const gender = rows[0][1];
+    const event = rows[0][2];
+    aiLines.push(gender + ' - ' + event);
+    rows.forEach(r => {
+      const teamTxt = r[4] ? (' Team ' + r[4]) : '';
+      aiLines.push(r[5] + '. ' + r[3] + teamTxt + ' - ' + r[6]);
+    });
+    aiLines.push('');
+  });
+
+  out.clear();
+  out.getRange(1, 1, out.getMaxRows(), 12).clearNote();
+  out.setRowHeights(1, out.getMaxRows(), 21);
+
+  out.getRange('A1:I1').merge()
+    .setValue('PLACERS EXPORT — ' + meetName + (meetDateDisplay ? (' — ' + meetDateDisplay) : '') + ' — ' + genderFilter + ' — Top ' + maxPlace)
+    .setFontWeight('bold').setFontSize(14)
+    .setHorizontalAlignment('center').setVerticalAlignment('middle')
+    .setBackground('#444444').setFontColor('white');
+  out.setRowHeight(1, 32);
+
+  out.getRange('A2:I2').setValues([['Meet #', 'Gender', 'Event', 'Athlete', 'Team', 'Place', 'Mark', 'Splits/Attempts', 'Notes']])
+    .setFontWeight('bold').setBackground('#e0e0e0');
+
+  out.getRange('A3:I3').merge()
+    .setValue(
+      'Team Summary — ' +
+      'Girls: place ' + (girlsSummary.place || 'not set') + ', points ' + (girlsSummary.points || 'not set') +
+      ' | Boys: place ' + (boysSummary.place || 'not set') + ', points ' + (boysSummary.points || 'not set')
+    )
+    .setBackground('#eef3ff').setFontWeight('bold');
+
+  if (placedRows.length > 0) {
+    out.getRange(4, 1, placedRows.length, 9).setValues(placedRows);
+    out.getRange(2, 1, placedRows.length + 2, 9).setBorder(true, true, true, true, true, true);
+  }
+
+  const aiStart = Math.max(placedRows.length + 6, 9);
+  out.getRange(aiStart, 1, 1, 9).merge()
+    .setValue('AI / EMAIL COPY BLOCK')
+    .setFontWeight('bold').setBackground('#d9ead3');
+  out.getRange(aiStart + 1, 1, 1, 9).merge()
+    .setValue(aiLines.join('\n'))
+    .setWrap(true)
+    .setVerticalAlignment('top')
+    .setBackground('#f3fff3');
+  out.setRowHeight(aiStart + 1, Math.max(160, aiLines.length * 18));
+
+  const sanityStart = aiStart + 3;
+  out.getRange(sanityStart, 1, 1, 9).merge()
+    .setValue('SANITY CHECK FLAGS')
+    .setFontWeight('bold').setBackground('#fff2cc');
+
+  if (uniqueFlags.length === 0) {
+    out.getRange(sanityStart + 1, 1, 1, 9).merge()
+      .setValue('No place-order issues detected in parsed marks.')
+      .setBackground('#f9f9f9');
+  } else {
+    for (let i = 0; i < uniqueFlags.length; i++) {
+      out.getRange(sanityStart + 1 + i, 1, 1, 9).merge()
+        .setValue(uniqueFlags[i])
+        .setWrap(true)
+        .setBackground('#fff8e1');
+    }
+  }
+
+  out.setColumnWidth(1, 70);
+  out.setColumnWidth(2, 80);
+  out.setColumnWidth(3, 170);
+  out.setColumnWidth(4, 180);
+  out.setColumnWidth(5, 70);
+  out.setColumnWidth(6, 60);
+  out.setColumnWidth(7, 120);
+  out.setColumnWidth(8, 170);
+  out.setColumnWidth(9, 220);
+  out.getRange('G:H').setNumberFormat('@');
+
+  const sanityMsg = uniqueFlags.length > 0
+    ? ('\n⚠️ ' + uniqueFlags.length + ' sanity flag(s) found. See the SANITY CHECK FLAGS section.')
+    : '\n✅ No sanity flags found.';
+
+  ui.alert(
+    '✅ Placers Export Ready',
+    placedRows.length + ' placed row(s) written to Placers_Export.' + sanityMsg,
     ui.ButtonSet.OK
   );
 }
