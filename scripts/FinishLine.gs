@@ -15,7 +15,7 @@
  *    E: Relay Team ID (relays only — "1", "2", etc.)
  *    F: Result/Mark (final time, distance, or relay team time)
  *    G: Splits/Attempts (comma-separated)
- *         - Relay:      individual leg split (one row per athlete)
+ *         - Relay:      individual leg split, or comma-separated splits for long relay legs
  *         - 800M Run:   "lap1, lap2"
  *         - 1600M Run:  "lap1, lap2, lap3, lap4"
  *         - Shot Put / Discus / Long Jump: "att1, att2, att3"
@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.66";
+const VERSION = "v2.78";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -54,8 +54,8 @@ const PRINT_EVT = [
 ];
 
 const RELAY_MEET_EVT = [
-  "Hurdle Shuttle", "400 M Relay", "800 M Relay", "Sprint Relay",
-  "1600 M Relay", "Special Relay", "Distance Relay",
+  "Hurdle Shuttle", "Distance Relay", "Sprint Relay", "Special Relay",
+  "400 M Relay", "800 M Relay", "1600 M Relay",
   "Shot Put", "Discus", "Long Jump", "High Jump"
 ];
 
@@ -80,7 +80,7 @@ function onOpen() {
     .createMenu('🏁 FINISH LINE')
     .addItem('1. Build / Rebuild Entire System', 'fullInitialize')
     .addItem('2. Generate Printable Lineup',      'generateLineupReport')
-    .addItem('3. Generate Printable Event Forms', 'generateEventFormReport')
+    .addItem('3. Generate Printable Event/Result Forms', 'generateEventFormReport')
     .addItem('4. Save Lineup as PDF',             'saveLineupPdf')
     .addItem('5. Save Event Forms as PDF',        'saveEventFormsPdf')
     .addSeparator()
@@ -90,6 +90,7 @@ function onOpen() {
     .addItem('9. Export Event Placers (Email/AI)', 'generatePlacersExport')
     .addSeparator()
     .addItem('10. Build Time-Trial List (100M)',  'buildTimeTrialRelayList')
+    .addSeparator()
     .addItem('11. Check PR Setup (debug)',        'checkPRSetup')
     .addItem('12. Check Meet Roster (debug)',     'checkMeetRoster')
     .addItem('13. Check Drive Access (PDF debug)', 'checkDriveAccess')
@@ -560,9 +561,11 @@ function generateLineupReport() {
         row++;
         aths.filter(a => a[4] == tId).forEach((m, idx) => {
           const pr = findPR(rosterData, m[3], ev);
-          const prDisplay = (pr && pr !== "-") ? pr : "—";
+          const prDisplay = formatRelayPrDisplay(pr, ev, m) || "—";
+          const relayDistLabel = getRelayLegDistanceLabel(m, ev);
+          const nameText = "  " + (relayDistLabel ? (relayDistLabel + " ") : "") + (idx + 1) + ". " + m[3];
           sheet.getRange(row, col, 1, 2)
-            .setValues([["  " + (idx + 1) + ". " + m[3], prDisplay]])
+            .setValues([[nameText, prDisplay]])
             .setBorder(true, true, true, true, true, null);
 
           if (pr && pr !== "-") {
@@ -661,6 +664,8 @@ function generateLineupReport() {
         m => m[0] == meetNum && matchesSelectedGender(m[1], gender) && m[2] == event && m[4] == teamId
       );
       const legNum = teamMembers.findIndex(m => m[3] === name) + 1;
+      const relayDistLabel = getRelayLegDistanceLabel(r, event);
+      if (relayDistLabel) eventText += " " + relayDistLabel;
       eventText += " (Team " + teamId + ", Leg " + legNum + ")";
     }
     
@@ -956,7 +961,10 @@ function generateEventFormReport() {
     let   row    = isLeft ? curL : curR;
 
     const startRow  = row;
-    const schoolRec = isCombined ? null : (formatCellValue(recordsData.find(r => r[0] == gender && r[1] == ev)?.[3]) || null);
+    let schoolRec = isCombined ? null : (formatCellValue(recordsData.find(r => r[0] == gender && r[1] == ev)?.[3]) || null);
+    if (!isCombined && isRelayMeet && isFieldEvent(ev)) {
+      schoolRec = getRelayFieldTeamSchoolRec(recordsData, gender, ev) || null;
+    }
     const aths      = entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && r[2] == ev);
 
     // Event header
@@ -972,11 +980,11 @@ function generateEventFormReport() {
     row++;
 
     if (isRelayEvent(ev)) {
-      row = renderRelayBlock(sheet, aths, row, col, schoolRec, ev);
+      row = renderRelayBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isRelayMeet && isAttemptEvent(ev)) {
-      row = renderRelayFieldAttemptBlock(sheet, aths, row, col, schoolRec, ev);
+      row = renderRelayFieldAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isRelayMeet) {
-      row = renderRelayFieldStandardBlock(sheet, aths, row, col, schoolRec, ev);
+      row = renderRelayFieldStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isSplitEvent(ev)) {
       row = renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isAttemptEvent(ev)) {
@@ -1096,6 +1104,7 @@ function saveReportPdf(sheetName, reportLabel) {
     '&printtitle=false' +
     '&pagenumbers=false' +
     '&gridlines=false' +
+    '&printnotes=false' +
     '&fzr=true';
 
   const params = {
@@ -1444,15 +1453,42 @@ function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
 }
 
 /** Relay event — grouped by team ID */
-function renderRelayBlock(sheet, aths, row, col, schoolRec, ev) {
+function renderRelayBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
   const teams = [...new Set(aths.map(a => a[4] || "1"))];
   teams.forEach(tId => {
     const members = aths.filter(a => a[4] == tId);
     members.forEach((m, idx) => {
-      sheet.getRange(row, col, 1, 2)
-        .setValues([[(idx + 1) + ". " + m[3], formatCellValue(m[6]) || ""]])
+      const pr = findPR(rosterData, m[3], ev);
+      const prDisplay = formatRelayPrDisplay(pr, ev, m) || "—";
+      const relayDistLabel = getRelayLegDistanceLabel(m, ev);
+      const nameBase = (relayDistLabel ? (relayDistLabel + " ") : "") + (idx + 1) + ". " + m[3];
+      const nameText = nameBase + "  (PR: " + prDisplay + ")";
+      const splitLabels = getRelayLegSplitLabels(ev, idx, members.length);
+      const splitValues = parseDelimitedCellValues(m[6]);
+      const mainSplitValue = splitLabels.length > 0 ? "" : (splitValues[0] || formatCellValue(m[6]) || "");
+      const rowRange = sheet.getRange(row, col, 1, 2);
+      const resultCell = sheet.getRange(row, col + 1);
+      rowRange
+        .setValues([[nameText, mainSplitValue]])
         .setBorder(true, true, true, true, true, null);
+      if (pr && pr !== "-") {
+        sheet.getRange(row, col).setRichTextValue(
+          SpreadsheetApp.newRichTextValue()
+            .setText(nameText)
+            .setTextStyle(nameBase.length + 2, nameText.length,
+              SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build())
+            .build()
+        );
+      }
+          applyRelayPrHighlight(rowRange, resultCell, getRelayComparableResult(m[6]), pr, ev);
       row++;
+      for (let splitIdx = 0; splitIdx < splitLabels.length; splitIdx++) {
+        sheet.getRange(row, col, 1, 2)
+          .setValues([["   ↳ " + splitLabels[splitIdx], splitValues[splitIdx] || ""]])
+          .setFontSize(8).setFontStyle("italic").setFontColor("#555555")
+          .setBorder(true, true, true, true, true, null);
+        row++;
+      }
     });
     // Team total row
     const lead    = members.find(m => m[5]) || members[0];
@@ -1473,20 +1509,41 @@ function renderRelayBlock(sheet, aths, row, col, schoolRec, ev) {
 }
 
 /** Relay-meet field event (non-attempt) — grouped by team ID with a team total row */
-function renderRelayFieldStandardBlock(sheet, aths, row, col, schoolRec, ev) {
+function renderRelayFieldStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
   const teams = [...new Set(aths.map(a => a[4] || "1"))];
   teams.forEach(tId => {
     const members = aths.filter(a => a[4] == tId);
     members.forEach((m, idx) => {
       const athleteRes = formatCellValue(m[5]) || "";
-      sheet.getRange(row, col, 1, 2)
-        .setValues([[(idx + 1) + ". " + m[3], athleteRes]])
+      const pr = findPR(rosterData, m[3], ev);
+      const prDisplay = formatRelayPrDisplay(pr, ev, m) || "—";
+      const startDist = getStartDistance(rosterData, m[3], ev);
+      const relayDistLabel = getRelayLegDistanceLabel(m, ev);
+      const nameBase = (relayDistLabel ? (relayDistLabel + " ") : "") + (idx + 1) + ". " + m[3] + (startDist ? " (start: " + startDist + ")" : "");
+      const nameText = nameBase + "  (PR: " + prDisplay + ")";
+      const rowRange = sheet.getRange(row, col, 1, 2);
+      const resultCell = sheet.getRange(row, col + 1);
+      rowRange
+        .setValues([[nameText, athleteRes]])
         .setBorder(true, true, true, true, true, null);
+      if (pr && pr !== "-") {
+        sheet.getRange(row, col).setRichTextValue(
+          SpreadsheetApp.newRichTextValue()
+            .setText(nameText)
+            .setTextStyle(nameBase.length + 2, nameText.length,
+              SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build())
+            .build()
+        );
+      }
+      applyRelayPrHighlight(rowRange, resultCell, athleteRes, pr, ev);
       row++;
     });
 
     const lead = members.find(m => m[5]) || members[0];
-    const res = lead ? formatCellValue(lead[5]) : "";
+    const teamTotalInches = sumRelayFieldTeamDistanceInches(members);
+    const res = (teamTotalInches !== null)
+      ? formatFeetInchesFromInches(teamTotalInches)
+      : (lead ? formatCellValue(lead[5]) : "");
     const place = lead ? lead[8] : "";
     const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
     const totalRange = sheet.getRange(row, col, 1, 2);
@@ -1504,18 +1561,36 @@ function renderRelayFieldStandardBlock(sheet, aths, row, col, schoolRec, ev) {
 }
 
 /** Relay-meet attempt event — grouped by team ID with 3 attempts and a team total row */
-function renderRelayFieldAttemptBlock(sheet, aths, row, col, schoolRec, ev) {
+function renderRelayFieldAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
   const teams = [...new Set(aths.map(a => a[4] || "1"))];
   teams.forEach(tId => {
     const members = aths.filter(a => a[4] == tId);
     members.forEach((m, idx) => {
       const athleteRes = formatCellValue(m[5]) || "";
-      const attempts = m[6] ? m[6].toString().split(",").map(s => s.trim()) : [];
+      const attempts = parseDelimitedCellValues(m[6]);
+      const pr = findPR(rosterData, m[3], ev);
+      const prDisplay = formatRelayPrDisplay(pr, ev, m) || "—";
+      const startDist = getStartDistance(rosterData, m[3], ev);
+      const relayDistLabel = getRelayLegDistanceLabel(m, ev);
+      const nameBase = (relayDistLabel ? (relayDistLabel + " ") : "") + (idx + 1) + ". " + m[3] + (startDist ? " (start: " + startDist + ")" : "");
+      const nameText = nameBase + "  (PR: " + prDisplay + ")";
 
-      sheet.getRange(row, col, 1, 2)
-        .setValues([[(idx + 1) + ". " + m[3], athleteRes]])
+      const rowRange = sheet.getRange(row, col, 1, 2);
+      const resultCell = sheet.getRange(row, col + 1);
+      rowRange
+        .setValues([[nameText, athleteRes]])
         .setFontWeight("bold")
         .setBorder(true, true, true, true, true, null);
+      if (pr && pr !== "-") {
+        sheet.getRange(row, col).setRichTextValue(
+          SpreadsheetApp.newRichTextValue()
+            .setText(nameText)
+            .setTextStyle(nameBase.length + 2, nameText.length,
+              SpreadsheetApp.newTextStyle().setForegroundColor("#1155cc").build())
+            .build()
+        );
+      }
+          applyRelayPrHighlight(rowRange, resultCell, athleteRes, pr, ev);
       row++;
 
       for (let att = 0; att < 3; att++) {
@@ -1528,7 +1603,10 @@ function renderRelayFieldAttemptBlock(sheet, aths, row, col, schoolRec, ev) {
     });
 
     const lead = members.find(m => m[5]) || members[0];
-    const res = lead ? formatCellValue(lead[5]) : "";
+    const teamTotalInches = sumRelayFieldTeamDistanceInches(members);
+    const res = (teamTotalInches !== null)
+      ? formatFeetInchesFromInches(teamTotalInches)
+      : (lead ? formatCellValue(lead[5]) : "");
     const place = lead ? lead[8] : "";
     const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
     const totalRange = sheet.getRange(row, col, 1, 2);
@@ -1557,7 +1635,7 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     const res   = formatCellValue(a[5]);
     const place = a[8];
     const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
-    const splits = a[6] ? a[6].toString().split(",").map(s => s.trim()) : [];
+    const splits = parseDelimitedCellValues(a[6]);
 
     // Athlete main row
     const nameCell   = sheet.getRange(row, col);
@@ -1608,7 +1686,7 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     const res      = formatCellValue(a[5]);
     const place    = a[8];
     const plTag    = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
-    const attempts = a[6] ? a[6].toString().split(",").map(s => s.trim()) : [];
+    const attempts = parseDelimitedCellValues(a[6]);
     const startDist = getStartDistance(rosterData, a[3], ev);
 
     // Athlete main row
@@ -1834,6 +1912,163 @@ function getStartDistance(rosterData, athleteName, eventName) {
 
   const dist = formatCellValue(athleteRow[startDistIdx]);
   return (dist && dist !== "-") ? dist : null;
+}
+
+function isSpecialRelayEvent(eventName) {
+  return eventName === "Distance Relay" || eventName === "Sprint Relay" || eventName === "Special Relay";
+}
+
+function getRelayLegDistanceLabel(entryRow, eventName) {
+  if (!isRelayEvent(eventName)) return "";
+  if (!entryRow || entryRow.length <= 7) return "";
+  const rawVal = entryRow[7];
+  if (rawVal === "" || rawVal === null || rawVal === undefined) return "";
+
+  let raw = "";
+  if (rawVal instanceof Date) {
+    raw = formatCellValue(rawVal);
+  } else {
+    raw = rawVal.toString().trim();
+  }
+
+  if (!raw || raw === "-") return "";
+  return "(" + raw + ")";
+}
+
+function formatRelayPrDisplay(pr, eventName, entryRow) {
+  if (!pr || pr === "-") return "";
+  return pr;
+}
+
+function parseDelimitedCellValues(val) {
+  const formatted = formatCellValue(val);
+  if (!formatted) return [];
+  return formatted.split(",").map(s => s.trim());
+}
+
+function getRelayComparableResult(splitVal) {
+  const splitValues = parseDelimitedCellValues(splitVal);
+  if (splitValues.length === 0) return "";
+  if (splitValues.length === 1) return splitValues[0];
+
+  let total = 0;
+  for (let i = 0; i < splitValues.length; i++) {
+    const parsed = parseComparablePerformance(splitValues[i]);
+    if (parsed === null) return "";
+    total += parsed;
+  }
+  return total;
+}
+
+function formatSecondsAsTimeString(seconds) {
+  if (seconds === null || seconds === undefined || isNaN(seconds)) return "";
+  const total = Number(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total - (mins * 60);
+  const secsText = secs.toFixed(2).padStart(5, '0');
+  return mins + ':' + secsText;
+}
+
+function parseComparablePerformance(val) {
+  if (val === "" || val === null || val === undefined) return null;
+  let s = val;
+  if (s instanceof Date) s = formatCellValue(s);
+  s = s.toString().trim();
+  if (!s || isNoMark(s)) return null;
+  if (s.includes("'")) {
+    const parts = s.split("'");
+    const feet = parseFloat(parts[0]) || 0;
+    const inches = parts[1] ? parseFloat(parts[1].replace('"', '')) || 0 : 0;
+    return (feet * 12) + inches;
+  }
+  if (s.includes(':')) {
+    const parts = s.split(':');
+    return (parseFloat(parts[0]) * 60) + parseFloat(parts[1]);
+  }
+  const parsed = parseFloat(s.replace(/[^\d.]/g, ''));
+  return isNaN(parsed) ? null : parsed;
+}
+
+function parseDistanceToInches(val) {
+  const s = formatCellValue(val);
+  if (!s || isNoMark(s)) return null;
+
+  // Typical field entry format: 18'3" (feet/inches)
+  if (s.includes("'")) {
+    const parts = s.split("'");
+    const feet = parseFloat(parts[0]) || 0;
+    const inches = parts[1] ? parseFloat(parts[1].replace('"', '')) || 0 : 0;
+    return (feet * 12) + inches;
+  }
+
+  // Fallback numeric format: assume feet (e.g., 18.25)
+  const numeric = parseFloat(s.replace(/[^\d.]/g, ''));
+  if (isNaN(numeric)) return null;
+  return numeric * 12;
+}
+
+function formatFeetInchesFromInches(totalInches) {
+  if (totalInches === null || totalInches === undefined) return "";
+  const feet = Math.floor(totalInches / 12);
+  const inchesRaw = totalInches - (feet * 12);
+  const inchesRounded = Math.round(inchesRaw * 10) / 10;
+  const inchesText = (Math.abs(inchesRounded - Math.round(inchesRounded)) < 0.000001)
+    ? String(Math.round(inchesRounded))
+    : String(inchesRounded);
+  return feet + "'" + inchesText + '"';
+}
+
+function sumRelayFieldTeamDistanceInches(members) {
+  let total = 0;
+  let count = 0;
+  members.forEach(m => {
+    const inches = parseDistanceToInches(m[5]);
+    if (inches !== null) {
+      total += inches;
+      count++;
+    }
+  });
+  return count > 0 ? total : null;
+}
+
+function getRelayFieldTeamSchoolRec(recordsData, gender, eventName) {
+  const variants = [
+    eventName + " Team Total",
+    eventName + " Relay Total",
+    eventName + " Team",
+    eventName + " Relay",
+    eventName + " (Team Total)"
+  ];
+
+  for (let i = 0; i < variants.length; i++) {
+    const rec = recordsData.find(r => r[0] == gender && r[1] == variants[i]);
+    const val = rec ? formatCellValue(rec[3]) : "";
+    if (val) return val;
+  }
+  return "";
+}
+
+function applyRelayPrHighlight(rowRange, resultCell, res, pr, ev) {
+  if (!res || isNoMark(res)) return;
+  if (!pr || pr === "-") {
+    rowRange.setBackground("#b6d7a8");
+    resultCell.setNote("⭐ First Time!");
+    return;
+  }
+  if (isBetter(res, pr, ev)) {
+    rowRange.setBackground("#b6d7a8");
+    resultCell.setNote("🎉 Personal Record!");
+  }
+}
+
+function getRelayLegSplitLabels(eventName, legIndex, teamSize) {
+  if (eventName === "Distance Relay" && legIndex >= Math.max(0, teamSize - 2)) {
+    return ["Split 1", "Split 2"];
+  }
+  if (eventName === "Special Relay" && legIndex === teamSize - 1) {
+    return ["Split 1", "Split 2"];
+  }
+  return [];
 }
 
 function getOrCreateSheet(ss, name) {
@@ -2917,9 +3152,17 @@ function findAndUpdatePRs() {
   results.forEach(r => {
     const name   = r[3];
     const event  = r[2];
-    // For relay events, use split time (col G); for individual events, use result (col F)
-    const result = isRelayEvent(event) ? r[6] : r[5];
+    // For relay events, use split time(s) from col G.
+    // If multiple splits are provided, sum them before comparing/updating PRs.
+    const relayComparable = isRelayEvent(event) ? getRelayComparableResult(r[6]) : null;
+    const result = isRelayEvent(event)
+      ? ((typeof relayComparable === 'number') ? formatSecondsAsTimeString(relayComparable) : relayComparable)
+      : r[5];
     const nameL  = name.toString().trim().toLowerCase();
+
+    if (result === '' || result === null || result === undefined || isNoMark(result)) {
+      return;
+    }
 
     // Find athlete in Roster
     let rosterRowIdx = -1;
@@ -2955,6 +3198,7 @@ function findAndUpdatePRs() {
         oldPR: hasNoPR ? '(none)' : formatCellValue(currentPR),
         newPR: formatCellValue(result),
         newPRRaw: result,  // keep raw value for writing
+        entryRow: r,
         rowIdx: rosterRowIdx,
         colIdx: eventColIdx
       });
@@ -2990,9 +3234,12 @@ function findAndUpdatePRs() {
     const end = Math.min(start + BATCH_SIZE, updates.length);
     const batchUpdates = updates.slice(start, end);
     
-    const previewLines = batchUpdates.map(u =>
-      u.name + ' | ' + u.event + ': ' + u.oldPR + ' → ' + u.newPR
-    );
+    const previewLines = batchUpdates.map(u => {
+      const legDist = isSpecialRelayEvent(u.event) ? getRelayLegDistanceLabel(u.entryRow, u.event) : '';
+      const oldTxt = (u.oldPR === '(none)') ? u.oldPR : (u.oldPR + legDist);
+      const newTxt = u.newPR + legDist;
+      return u.name + ' | ' + u.event + ': ' + oldTxt + ' → ' + newTxt;
+    });
     
     const isLastBatch = (batch === totalBatches - 1);
     const title = totalBatches > 1
