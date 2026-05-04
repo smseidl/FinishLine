@@ -27,13 +27,15 @@ Generates printable Lineup and Event Form reports from Google Sheets data.
 1. Click **🏁 FINISH LINE → 1. Build / Rebuild Entire System**.
 2. Accept the authorization prompt if it appears (first run only).
 3. Click through any "This app isn't verified" warnings — this is your own script.
-4. A success alert will appear when done. Six tabs will be created:
+4. A success alert will appear when done. These tabs will be created:
    - `Home` — control panel
    - `Schedule` — meet calendar
    - `Data_Entry` — results entry
    - `Roster` — athlete list with PRs
    - `School_Records` — record book
+   - `Historical_PRs` — past-year PRs for year-over-year comparisons
    - `Lineup_View` and `Event_Form_Printable` — generated output
+   - `Top_Marks` and `Athlete_Recaps` — additional generated reports
 
 ### Step 4 — Set Up the Installable Trigger ⚠️ (required)
 
@@ -54,9 +56,10 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 
 | Tab | What to enter |
 |-----|---------------|
-| `Schedule` | One row per meet: Meet #, Date, Meet Name, Location, etc. |
+| `Schedule` | One row per meet: Meet #, Date, Meet Name, Location, Type, etc. |
 | `Roster` | One row per athlete: Athlete Name, **Display Name**, Gender, Grade, PRs |
 | `School_Records` | One row per record: Gender, Event, Athlete, Record |
+| `Historical_PRs` | Past-year PRs (same format as Roster) — copy from Roster at end of each season |
 | `Data_Entry` | Results after each meet: Meet #, Gender, Event, Athlete Name, Result |
 
 > **Display Name** is the name the coach uses in `Data_Entry`. It's the primary key for PR lookups.
@@ -72,6 +75,18 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 4. Wait 5–15 seconds for the status message to appear (normal GAS startup delay).
 5. Switch to `Lineup_View` or `Event_Form_Printable` to print.
    - For printing: **File → Print**, set to landscape, adjust page breaks manually as needed.
+6. After the meet, click **▶ Update PRs from This Meet** to automatically update athlete PRs
+   in the Roster. You'll see a preview of all changes before anything is saved.
+
+### Pentathlon Notes
+
+- Pentathlon Event/Result forms use an individual-results layout, not team scoring.
+- No `TEAM PLACE` or `TEAM POINTS` row is shown for Pentathlon meets.
+- No `At-Meet Additions` lines are shown on Pentathlon forms.
+- Shot Put and Long Jump render with **2 attempts** instead of 3.
+- A standings table is added at the bottom showing `Meet Place`, athlete, and `Total Points`.
+- Pentathlon standings read the combined `place/points` value from the `Place` column in `Data_Entry`.
+- In combined-generation mode, the standings table still labels each athlete with their actual roster gender.
 
 ---
 
@@ -85,12 +100,32 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 
 ---
 
-## Debug Tools (🏁 FINISH LINE menu)
+## Additional Tools (🏁 FINISH LINE menu)
+
+### Reports
+
+| Menu Item | Purpose |
+|-----------|--------|
+| **3. Generate Printable Lineup** | Pre-meet lineup with PRs; also writes a By-Athlete view and Conference Lineup section |
+| **4. Generate Printable Event/Result Forms** | Post-meet event forms with results, PR/record highlights |
+| **7. Generate Top Marks (YTD)** | Year-to-date top N performers per event (set N in the Home tab Top N field) |
+| **8. Generate All Athlete Recaps** | Year-end recap per athlete: meet-by-meet results + year-over-year PR table |
+| **9. Generate Filtered Results** | Filter results by grade and/or event with multiple sort options |
+| **10. Export Event Placers (Email/AI)** | Export placed results formatted for email or AI use; includes sanity checks |
+| **11. Build Time-Trial List (100M)** | Builds a 100 M Dash entry list for athletes not in a main meet (time-trial seeding) |
+
+### Conference Seeding Mode
+
+| Menu Item | Purpose |
+|-----------|--------|
+| **2. Set Conference Seeding Mode** | Configure when estimated seed times appear in the Conference Lineup section of the lineup report. Options: Championship only (default), All meets, or Off |
+
+### Debug Tools
 
 | Tool | Purpose |
-|------|---------|
-| **Check PR Setup** | Finds athletes in `Data_Entry` with no matching Roster entry, and Roster rows missing a Display Name |
-| **Check Meet Roster** | For a specific meet/gender, lists any `Data_Entry` names that don't match the Roster |
+|------|--------|
+| **Check PR Setup (debug)** | Finds athletes in `Data_Entry` with no matching Roster entry, and Roster rows missing a Display Name |
+| **Check Meet Roster (debug)** | For a specific meet/gender, lists any `Data_Entry` names that don't match the Roster |
 
 ---
 
@@ -100,7 +135,9 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 FinishLine/
 ├── scripts/
 │   └── FinishLine.gs    ← paste this into Apps Script
-├── instructions/        ← development notes and AI context
+├── instructions/
+│   ├── DEVELOPER.md     ← developer reference: all functions documented
+│   └── FINISHLINE_CONTEXT.md
 └── README.md
 ```
 
@@ -114,3 +151,19 @@ FinishLine/
 | 🟢 Green row | Personal record or first-time result |
 | 🔵 Blue PR text | Existing PR shown for reference |
 | 🔵 Light blue cell | No prior PR on record (Lineup only) |
+
+---
+
+## Conference Lineup
+
+The bottom section of the Lineup report (`CONFERENCE LINEUP`) is formatted for
+digital conference submission. It lists each athlete by first name and last initial.
+
+For Championship meets (default), estimated seed times appear next to each name
+in parentheses (e.g., `Emma S. (1:12.34)`). A brief note explaining the estimate
+(PR, past result, or relay leg sum) is shown alongside each entry.
+
+Athletes with no estimate show `(TBD)` — add their result to `Data_Entry` or PR
+to the `Roster` to generate an estimate.
+
+To change when seeding estimates appear, use **🏁 FINISH LINE → 2. Set Conference Seeding Mode**.

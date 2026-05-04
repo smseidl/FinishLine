@@ -31,12 +31,15 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.78";
+const VERSION = "v2.112";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
 const PDF_FOLDER_PROP_KEY = "FINISHLINE_PDF_FOLDER_ID";
+const CONF_SEED_MODE_PROP_KEY = "FINISHLINE_CONF_SEED_MODE";
+const CONF_SEED_MODE_DEFAULT = "championship";
 const DRIVE_WRITE_SCOPE = "https://www.googleapis.com/auth/drive";
+const ENABLE_PDF_EXPORT = false;
 
 // ── EVENT LISTS ──────────────────────────────────────────────
 
@@ -76,25 +79,32 @@ const PAGE_HEIGHT = 45;
 // ── MENU ─────────────────────────────────────────────────────
 
 function onOpen() {
-  SpreadsheetApp.getUi()
+  const menu = SpreadsheetApp.getUi()
     .createMenu('🏁 FINISH LINE')
     .addItem('1. Build / Rebuild Entire System', 'fullInitialize')
-    .addItem('2. Generate Printable Lineup',      'generateLineupReport')
-    .addItem('3. Generate Printable Event/Result Forms', 'generateEventFormReport')
-    .addItem('4. Save Lineup as PDF',             'saveLineupPdf')
-    .addItem('5. Save Event Forms as PDF',        'saveEventFormsPdf')
+    .addItem('2. Set Conference Seeding Mode',       'configureConferenceSeedingMode')    
+    .addItem('3. Generate Printable Lineup',      'generateLineupReport')
+    .addItem('4. Generate Printable Event/Result Forms', 'generateEventFormReport')
     .addSeparator()
-    .addItem('6. Generate Top Marks (YTD)',       'generateTopMarks')
-    .addItem('7. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
-    .addItem('8. Generate Filtered Results',      'generateFilteredResults')
-    .addItem('9. Export Event Placers (Email/AI)', 'generatePlacersExport')
+    .addItem('7. Generate Top Marks (YTD)',       'generateTopMarks')
+    .addItem('8. Generate All Athlete Recaps',    'generateAllAthleteRecaps')
+    .addItem('9. Generate Filtered Results',      'generateFilteredResults')
+    .addItem('10. Export Event Placers (Email/AI)', 'generatePlacersExport')
     .addSeparator()
-    .addItem('10. Build Time-Trial List (100M)',  'buildTimeTrialRelayList')
+    .addItem('11. Build Time-Trial List (100M)',  'buildTimeTrialRelayList')
     .addSeparator()
-    .addItem('11. Check PR Setup (debug)',        'checkPRSetup')
-    .addItem('12. Check Meet Roster (debug)',     'checkMeetRoster')
-    .addItem('13. Check Drive Access (PDF debug)', 'checkDriveAccess')
-    .addToUi();
+    .addItem('Check PR Setup (debug)',        'checkPRSetup')
+    .addItem('Check Meet Roster (debug)',     'checkMeetRoster');
+
+  if (ENABLE_PDF_EXPORT) {
+    menu
+      .addSeparator()
+      .addItem('Save Lineup as PDF',             'saveLineupPdf')
+      .addItem('Save Event Forms as PDF',        'saveEventFormsPdf')
+      .addItem('Check Drive Access (PDF debug)', 'checkDriveAccess');
+  }
+
+  menu.addToUi();
 }
 
 // ── CHECKBOX BUTTON HANDLER ───────────────────────────────────
@@ -713,7 +723,11 @@ function generateLineupReport() {
   // Event-by-event lineup for conference submission using short name format
   // Positioned at end since it's never printed — only used for digital submission
   const confLineupStart = athRow + 3;
+  const includeConferenceSeeding = shouldIncludeConferenceSeedEstimates(meetType);
   
+  // Widen col B in this section to fit seed-basis notes
+  if (includeConferenceSeeding) sheet.setColumnWidth(2, 200);
+
   // Title row
   sheet.getRange(confLineupStart, 1, 1, 5).merge()
     .setValue(titlePrefix + " — CONFERENCE LINEUP (" + genderLabel + ")")
@@ -735,6 +749,12 @@ function generateLineupReport() {
       .setValue(ev.toUpperCase())
       .setFontWeight("bold").setFontSize(11)
       .setBackground("#e0e0e0");
+    if (includeConferenceSeeding && isHeatSeedingEvent(ev)) {
+      sheet.getRange(confRow, 2)
+        .setValue("Seed basis")
+        .setFontWeight("bold").setFontSize(9).setFontStyle("italic")
+        .setFontColor("#444444").setBackground("#e0e0e0");
+    }
     confRow++;
     
     // Collect athlete names and format for conference
@@ -778,11 +798,26 @@ function generateLineupReport() {
       teams.forEach(tId => {
         const teamMembers = teamGroups[tId];
         const formattedNames = formatConferenceNamesFromParts(teamMembers, false);
+        const teamSeed = includeConferenceSeeding
+          ? getRelayTeamSeedEstimate(
+              eventAthletes.filter(a => (a[4] || "1") == tId),
+              rosterData,
+              entryData,
+              meetNum,
+              gender,
+              ev
+            )
+          : { value: '', source: '' };
         
         if (formattedNames.length > 0) {
           sheet.getRange(confRow, 1)
-            .setValue("Team " + tId + ": " + formattedNames.join(", "))
+            .setValue("Team " + tId + ": " + formattedNames.join(", ") + formatConferenceSeedText(teamSeed.value, ev, includeConferenceSeeding))
             .setFontSize(10);
+          if (includeConferenceSeeding && isHeatSeedingEvent(ev) && teamSeed.source) {
+            sheet.getRange(confRow, 2)
+              .setValue(teamSeed.source)
+              .setFontSize(8).setFontStyle("italic").setFontColor("#666666").setWrap(true);
+          }
           confRow++;
         }
       });
@@ -803,27 +838,46 @@ function generateLineupReport() {
           const fullName = (rosterRow[0] || '').toString().trim();
           const nameParts = fullName.split(/\s+/);
           const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : '';
+          const seedObj = includeConferenceSeeding ? getConferenceSeedEstimate(rosterData, a, ev) : { value: '', source: '' };
           conferenceNames.push({
             displayName: displayNameUse,
-            lastName: lastName
+            lastName: lastName,
+            seedEstimate: seedObj.value,
+            seedSource: seedObj.source
           });
         } else {
           // Fallback: use display name from Data_Entry
           const parts = displayName.split(/\s+/);
+          const seedObjFb = includeConferenceSeeding ? getConferenceSeedEstimate(rosterData, a, ev) : { value: '', source: '' };
           conferenceNames.push({
             displayName: parts.slice(0, -1).join(' ') || parts[0],
-            lastName: parts[parts.length - 1] || ''
+            lastName: parts[parts.length - 1] || '',
+            seedEstimate: seedObjFb.value,
+            seedSource: seedObjFb.source
           });
         }
       });
       
-      // Format and output individual names
-      const formattedNames = formatConferenceNamesFromParts(conferenceNames);
-      if (formattedNames.length > 0) {
-        formattedNames.forEach(name => {
+      // Format and output individual names with optional estimated seeds.
+      const formattedEntries = formatConferenceEntriesFromParts(conferenceNames);
+      if (includeConferenceSeeding && isHeatSeedingEvent(ev)) {
+        formattedEntries.sort((a, b) => {
+          const seedCmp = compareEventSeedValues(a.seedEstimate, b.seedEstimate, ev);
+          if (seedCmp !== 0) return seedCmp;
+          return a.formattedName.toLowerCase().localeCompare(b.formattedName.toLowerCase());
+        });
+      }
+
+      if (formattedEntries.length > 0) {
+        formattedEntries.forEach(entry => {
           sheet.getRange(confRow, 1)
-            .setValue(name)
+            .setValue(entry.formattedName + formatConferenceSeedText(entry.seedEstimate, ev, includeConferenceSeeding))
             .setFontSize(10);
+          if (includeConferenceSeeding && isHeatSeedingEvent(ev) && entry.seedSource) {
+            sheet.getRange(confRow, 2)
+              .setValue(entry.seedSource)
+              .setFontSize(8).setFontStyle("italic").setFontColor("#666666").setWrap(true);
+          }
           confRow++;
         });
       }
@@ -914,8 +968,9 @@ function generateEventFormReport() {
   const meetName    = (meetRow[6] || "MEET").toUpperCase();
   const meetDateDisplay = formatMeetDateForTitle(meetRow[1]);
   const titlePrefix = meetDateDisplay ? (meetName + " — " + meetDateDisplay) : meetName;
+  const isPentathlon = meetType === '8th Grade Pentathlon';
   const standing    = isCombined ? '' : ((gender === "Boys") ? meetRow[7] : meetRow[8]);
-  const standingStr = standing ? " | STANDING: " + standing : "";
+  const standingStr = (!isPentathlon && standing) ? " | STANDING: " + standing : "";
 
   sheet.clear();
   sheet.getRange(1, 1, sheet.getMaxRows(), 9).clearNote();
@@ -931,15 +986,18 @@ function generateEventFormReport() {
     .setBackground("#1c4587").setFontColor("white");
   sheet.setRowHeight(1, 36);
 
-  // Team scoring summary section (row 2)
-  sheet.getRange("A2").setValue("TEAM PLACE:").setFontWeight("bold").setFontSize(10);
-  sheet.getRange("B2").setBackground("#fff2cc");
-  sheet.getRange("C2").setValue("  ");
-  sheet.getRange("D2").setValue("TEAM POINTS:").setFontWeight("bold").setFontSize(10);
-  sheet.getRange("E2").setBackground("#fff2cc");
-  sheet.setRowHeight(2, 24);
+  // Pentathlon is individual scoring only, so do not render Team Place/Points row.
+  if (!isPentathlon) {
+    sheet.getRange("A2").setValue("TEAM PLACE:").setFontWeight("bold").setFontSize(10);
+    sheet.getRange("B2").setBackground("#fff2cc");
+    sheet.getRange("C2").setValue("  ");
+    sheet.getRange("D2").setValue("TEAM POINTS:").setFontWeight("bold").setFontSize(10);
+    sheet.getRange("E2").setBackground("#fff2cc");
+    sheet.setRowHeight(2, 24);
+  }
 
-  let curL = 4, curR = 4;
+  let curL = isPentathlon ? 3 : 4;
+  let curR = isPentathlon ? 3 : 4;
 
   // Layout: first 5 track events → left col, next 4 track events → right col,
   // field events sync to bottom of both cols then alternate left/right.
@@ -965,15 +1023,16 @@ function generateEventFormReport() {
     if (!isCombined && isRelayMeet && isFieldEvent(ev)) {
       schoolRec = getRelayFieldTeamSchoolRec(recordsData, gender, ev) || null;
     }
+    const schoolRecDisplay = getEventFormSchoolRecDisplay(recordsData, gender, ev, meetType, schoolRec);
     const aths      = entryData.filter(r => r[0] == meetNum && matchesSelectedGender(r[1], gender) && r[2] == ev);
 
     // Event header
     sheet.getRange(row, col, 1, 2)
-      .setValues([[ev.toUpperCase(), "Rec: " + (schoolRec || "")]])
+      .setValues([[ev.toUpperCase(), "Rec: " + (schoolRecDisplay || "")]])
       .setBackground("#444444").setFontColor("white").setFontWeight("bold")
       .setBorder(true, true, true, true, true, null);
     // Highlight the Rec: cell in amber when a school record exists
-    if (schoolRec) {
+    if (schoolRecDisplay) {
       sheet.getRange(row, col + 1)
         .setBackground("#bf9000").setFontColor("white");
     }
@@ -986,18 +1045,19 @@ function generateEventFormReport() {
     } else if (isRelayMeet) {
       row = renderRelayFieldStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
     } else if (isSplitEvent(ev)) {
-      row = renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
+      row = renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, gender, meetType);
     } else if (isAttemptEvent(ev)) {
-      row = renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
+      row = renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, gender, meetType);
     } else {
-      row = renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev);
+      row = renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, gender, meetType);
     }
 
     // Add blank rows for at-meet additions (write-ins) only when enabled for this meet type.
     const suppressWriteInsForMeetType =
       meetType === 'Invitational' ||
       meetType === 'Relays' ||
-      meetType === 'Championship';
+      meetType === 'Championship' ||
+      meetType === '8th Grade Pentathlon';
     if (!suppressWriteInsForMeetType) {
       const additionCount = 2;
 
@@ -1019,20 +1079,53 @@ function generateEventFormReport() {
     if (isLeft) curL = row + 1; else curR = row + 1;
   });
 
+  if (isPentathlon) {
+    const summaryRow = Math.max(curL, curR) + 1;
+    renderPentathlonPlacePointsBlock(sheet, entryData, rosterData, meetNum, gender, summaryRow, 1);
+  }
+
   return true;
 }
 
 // ── PDF EXPORTS ──────────────────────────────────────────────
+// DEPRECATED (v2.98+): Script-driven PDF export is disabled.
+// Reason: GAS export cannot reliably preserve manual page breaks/margins.
+// Status: Retained temporarily for compatibility and potential rollback;
+// all entry points hard-stop when ENABLE_PDF_EXPORT is false.
 
 function saveLineupPdf() {
+  if (!ENABLE_PDF_EXPORT) {
+    SpreadsheetApp.getUi().alert(
+      'PDF Export Disabled',
+      'PDF export has been removed because Apps Script cannot reliably preserve manual page breaks and print margin tuning. Use File → Print from the report tab for final output.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
   saveReportPdf('Lineup_View', 'Lineup');
 }
 
 function saveEventFormsPdf() {
+  if (!ENABLE_PDF_EXPORT) {
+    SpreadsheetApp.getUi().alert(
+      'PDF Export Disabled',
+      'PDF export has been removed because Apps Script cannot reliably preserve manual page breaks and print margin tuning. Use File → Print from the report tab for final output.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
   saveReportPdf('Event_Form_Printable', 'EventForms');
 }
 
 function saveReportPdf(sheetName, reportLabel) {
+  if (!ENABLE_PDF_EXPORT) {
+    SpreadsheetApp.getUi().alert(
+      'PDF Export Disabled',
+      'PDF export has been removed because Apps Script cannot reliably preserve manual page breaks and print margin tuning. Use File → Print from the report tab for final output.',
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+    return;
+  }
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const ui = SpreadsheetApp.getUi();
   const home = ss.getSheetByName('Home');
@@ -1087,19 +1180,22 @@ function saveReportPdf(sheetName, reportLabel) {
   const folder = resolvePdfFolder(ui);
   if (!folder) return; // canceled or invalid
 
-  const meetDate = formatMeetDateForFileName(meetRow[1]);
   const meetName = sanitizeFilePart((meetRow[6] || 'Meet').toString());
   const genderLabel = sanitizeFilePart(getOutputGenderLabel(gender));
   const suffix = promptPdfSuffix(ui, reportLabel);
   if (suffix === null) return; // canceled
-  const fileName = meetDate + '_' + genderLabel + '_' + meetName + '_' + reportLabel + suffix + '.pdf';
+  const fileName = meetName + '_' + genderLabel + '_' + reportLabel + suffix + '.pdf';
 
   const url = 'https://docs.google.com/spreadsheets/d/' + ss.getId() + '/export' +
     '?format=pdf' +
     '&gid=' + sheet.getSheetId() +
     '&size=letter' +
     '&portrait=true' +
-    '&fitw=true' +
+    '&fitw=false' +
+    '&top_margin=0.50' +
+    '&bottom_margin=0.50' +
+    '&left_margin=0.50' +
+    '&right_margin=0.50' +
     '&sheetnames=false' +
     '&printtitle=false' +
     '&pagenumbers=false' +
@@ -1147,6 +1243,54 @@ function promptPdfExportMode(ui, reportLabel) {
   if (resp === ui.Button.NO) return 'as-is';
   return 'cancel';
 }
+
+function configureConferenceSeedingMode() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getDocumentProperties();
+  const current = getConferenceSeedingMode();
+  const resp = ui.prompt(
+    'Conference Seeding Mode',
+    'Choose mode for conference lineup estimates:\n\n' +
+    '1 = Championship only (default)\n' +
+    '2 = All meets\n' +
+    '3 = Off\n\n' +
+    'Current: ' + current,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  const raw = (resp.getResponseText() || '').toString().trim().toLowerCase();
+  let mode = '';
+  if (raw === '1' || raw === 'championship' || raw === 'championship-only') mode = 'championship';
+  if (raw === '2' || raw === 'all') mode = 'all';
+  if (raw === '3' || raw === 'off') mode = 'off';
+
+  if (!mode) {
+    ui.alert('Invalid option. Enter 1, 2, or 3.');
+    return;
+  }
+
+  props.setProperty(CONF_SEED_MODE_PROP_KEY, mode);
+  ui.alert('Conference seeding mode set to: ' + mode);
+}
+
+function getConferenceSeedingMode() {
+  const props = PropertiesService.getDocumentProperties();
+  const raw = (props.getProperty(CONF_SEED_MODE_PROP_KEY) || CONF_SEED_MODE_DEFAULT).toString().trim().toLowerCase();
+  if (raw === 'all' || raw === 'championship' || raw === 'off') return raw;
+  return CONF_SEED_MODE_DEFAULT;
+}
+
+function shouldIncludeConferenceSeedEstimates(meetType) {
+  const mode = getConferenceSeedingMode();
+  if (mode === 'off') return false;
+  if (mode === 'all') return true;
+  return meetType === 'Championship';
+}
+
+// DEPRECATED (v2.98+): PDF/Drive helper stack below is currently unused in
+// normal user flow because menu actions are removed and PDF entry points are
+// hard-disabled. Keep only until full code deletion is approved.
 
 function ensureDriveAuthorization(ui) {
   try {
@@ -1399,12 +1543,13 @@ function formatMeetDateForTitle(meetDateVal) {
 // ── RENDER HELPERS ────────────────────────────────────────────
 
 /** Standard track event (100M, 200M, 400M, hurdles) */
-function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
+function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, selectedGender, meetType) {
   aths.forEach(a => {
     const pr    = findPR(rosterData, a[3], ev);
+    const athleteSchoolRec = getAthleteSchoolRecForEvent(recordsData, selectedGender, a[1], ev, meetType, schoolRec);
     const res   = formatCellValue(a[5]);
     const place = a[8];
-    const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const plTag = getEventResultPlaceTag(place, meetType);
     const startDist = getStartDistance(rosterData, a[3], ev);
 
     const nameCell   = sheet.getRange(row, col);
@@ -1439,7 +1584,7 @@ function renderStandardBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
 
     // Highlight result cell and name cell
     if (res && !isNoMark(res)) {
-      if (schoolRec && isBetter(res, schoolRec, ev)) {
+      if (athleteSchoolRec && isBetter(res, athleteSchoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
       } else if (!pr || pr === "-" || isBetter(res, pr, ev)) {
@@ -1624,7 +1769,7 @@ function renderRelayFieldAttemptBlock(sheet, aths, row, col, rosterData, schoolR
 }
 
 /** 800M / 1600M Run — one row per athlete, splits on sub-rows */
-function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
+function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, selectedGender, meetType) {
   const lapCount = ev.includes("1600") ? 4 : 2;
   const lapLabels = ev.includes("1600")
     ? ["Lap 1", "Lap 2", "Lap 3", "Lap 4"]
@@ -1632,9 +1777,10 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
 
   aths.forEach(a => {
     const pr    = findPR(rosterData, a[3], ev);
+    const athleteSchoolRec = getAthleteSchoolRecForEvent(recordsData, selectedGender, a[1], ev, meetType, schoolRec);
     const res   = formatCellValue(a[5]);
     const place = a[8];
-    const plTag = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const plTag = getEventResultPlaceTag(place, meetType);
     const splits = parseDelimitedCellValues(a[6]);
 
     // Athlete main row
@@ -1657,7 +1803,7 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     rowRange.setBorder(true, true, true, true, true, null).setFontWeight("bold");
 
     if (res && !isNoMark(res)) {
-      if (schoolRec && isBetter(res, schoolRec, ev)) {
+      if (athleteSchoolRec && isBetter(res, athleteSchoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
       } else if (!pr || pr === "-" || isBetter(res, pr, ev)) {
@@ -1679,13 +1825,15 @@ function renderSplitBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
   return row;
 }
 
-/** Shot Put / Discus / Long Jump — 3 attempts */
-function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
+/** Shot Put / Discus / Long Jump — usually 3 attempts; Pentathlon uses 2 */
+function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev, recordsData, selectedGender, meetType) {
+  const attemptCount = meetType === '8th Grade Pentathlon' ? 2 : 3;
   aths.forEach(a => {
     const pr       = findPR(rosterData, a[3], ev);
+    const athleteSchoolRec = getAthleteSchoolRecForEvent(recordsData, selectedGender, a[1], ev, meetType, schoolRec);
     const res      = formatCellValue(a[5]);
     const place    = a[8];
-    const plTag    = (place !== "" && place !== null && place !== undefined) ? "  [" + place + "]" : "";
+    const plTag    = getEventResultPlaceTag(place, meetType);
     const attempts = parseDelimitedCellValues(a[6]);
     const startDist = getStartDistance(rosterData, a[3], ev);
 
@@ -1721,7 +1869,7 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     rowRange.setBorder(true, true, true, true, true, null).setFontWeight("bold");
 
     if (res && !isNoMark(res)) {
-      if (schoolRec && isBetter(res, schoolRec, ev)) {
+      if (athleteSchoolRec && isBetter(res, athleteSchoolRec, ev)) {
         rowRange.setBackground("#ffe599");
         resultCell.setNote("🏆 School Record!");
       } else if (!pr || pr === "-" || isBetter(res, pr, ev)) {
@@ -1732,7 +1880,7 @@ function renderAttemptBlock(sheet, aths, row, col, rosterData, schoolRec, ev) {
     row++;
 
     // Attempt sub-rows
-    for (let att = 0; att < 3; att++) {
+    for (let att = 0; att < attemptCount; att++) {
       sheet.getRange(row, col, 1, 2)
         .setValues([["   ↳ Attempt " + (att + 1), attempts[att] || ""]])
         .setFontSize(8).setFontStyle("italic").setFontColor("#555555")
@@ -1791,6 +1939,214 @@ function formatConferenceNamesFromParts(nameParts, sortOutput) {
 }
 
 /**
+ * Same conference name formatting as formatConferenceNamesFromParts(), but
+ * preserves an optional seedEstimate value with each name.
+ */
+function formatConferenceEntriesFromParts(nameParts, sortOutput) {
+  if (sortOutput === undefined) sortOutput = true;
+  const parsed = nameParts.map(np => {
+    const displayName = np.displayName || '';
+    const lastName = np.lastName || '';
+    const lastInitial = lastName.charAt(0).toUpperCase();
+    const shortForm = displayName + ' ' + lastInitial;
+
+    return {
+      displayName: displayName,
+      lastName: lastName,
+      shortForm: shortForm,
+      seedEstimate: np.seedEstimate || '',
+      seedSource: np.seedSource || ''
+    };
+  });
+
+  const shortFormCounts = {};
+  parsed.forEach(p => {
+    shortFormCounts[p.shortForm] = (shortFormCounts[p.shortForm] || 0) + 1;
+  });
+
+  const formatted = parsed.map(p => {
+    const formattedName = shortFormCounts[p.shortForm] > 1
+      ? (p.displayName + ' ' + p.lastName).trim()
+      : p.shortForm.trim();
+    return {
+      formattedName: formattedName,
+      seedEstimate: p.seedEstimate,
+      seedSource: p.seedSource
+    };
+  });
+
+  if (sortOutput) {
+    formatted.sort((a, b) => a.formattedName.toLowerCase().localeCompare(b.formattedName.toLowerCase()));
+  }
+  return formatted;
+}
+
+function isHeatSeedingEvent(eventName) {
+  return !isFieldEvent(eventName);
+}
+
+function getConferenceSeedEstimate(rosterData, entryRow, eventName) {
+  if (!isHeatSeedingEvent(eventName)) return { value: '', source: '' };
+  if (!entryRow) return { value: '', source: '' };
+
+  const athleteName = entryRow[3];
+  const pr = findPR(rosterData, athleteName, eventName);
+  if (pr && pr !== '-' && !isNoMark(pr)) {
+    return { value: formatCellValue(pr), source: 'PR: ' + formatCellValue(pr) };
+  }
+
+  const result = formatCellValue(entryRow[5]);
+  if (result && result !== '-' && !isNoMark(result)) {
+    return { value: result, source: 'Result: ' + result + ' (no PR on record)' };
+  }
+
+  const relayComparable = getRelayComparableResult(entryRow[6]);
+  if (typeof relayComparable === 'number') {
+    const t = formatSecondsAsTimeString(relayComparable);
+    return { value: t, source: 'Split: ' + t };
+  }
+  return { value: '', source: 'No PR or result on record — add to Roster or Data_Entry' };
+}
+
+function getRelayTeamSeedEstimate(teamEntries, rosterData, entryData, meetNum, selectedGender, eventName) {
+  if (!isHeatSeedingEvent(eventName) || !teamEntries || teamEntries.length === 0) return { value: '', source: '' };
+
+  const targetGroupKey = getRelayTeamGroupKey(teamEntries, rosterData);
+  if (targetGroupKey) {
+    const groupedRuns = {};
+    entryData.slice(1).forEach(r => {
+      if (r[2] != eventName) return;
+      if (!matchesSelectedGender(r[1], selectedGender)) return;
+      if (r[0] == meetNum) return;
+
+      const groupKey = String(r[0]) + '||' + String(r[1]) + '||' + String(r[4] || '1');
+      if (!groupedRuns[groupKey]) groupedRuns[groupKey] = [];
+      groupedRuns[groupKey].push(r);
+    });
+
+    let bestPastTeamMark = '';
+    Object.keys(groupedRuns).forEach(k => {
+      const runRows = groupedRuns[k];
+      const runGroupKey = getRelayTeamGroupKey(runRows, rosterData);
+      if (runGroupKey !== targetGroupKey) return;
+
+      const runTeamMark = getRelayTeamMarkFromEntries(runRows, eventName);
+      if (!runTeamMark) return;
+      if (!bestPastTeamMark || isBetter(runTeamMark, bestPastTeamMark, eventName)) {
+        bestPastTeamMark = runTeamMark;
+      }
+    });
+
+    // Collect ALL past marks for this group to show context
+    const allPastMarks = [];
+    Object.keys(groupedRuns).forEach(k => {
+      const runRows = groupedRuns[k];
+      const runGroupKey = getRelayTeamGroupKey(runRows, rosterData);
+      if (runGroupKey !== targetGroupKey) return;
+      const runTeamMark = getRelayTeamMarkFromEntries(runRows, eventName);
+      if (runTeamMark) allPastMarks.push(runTeamMark);
+    });
+
+    if (bestPastTeamMark) {
+      allPastMarks.sort((a, b) => compareEventSeedValues(a, b, eventName));
+      const marksStr = allPastMarks.join(', ');
+      const sourceStr = allPastMarks.length > 1
+        ? 'Past times: ' + marksStr + ' (using best)'
+        : 'Past team time: ' + bestPastTeamMark;
+      return { value: bestPastTeamMark, source: sourceStr };
+    }
+  }
+
+  // Fallback: sum each leg estimate when no same-group relay mark exists.
+  let totalSeconds = 0;
+  const legBreakdown = [];
+  const missingLegs = [];
+
+  teamEntries.forEach(row => {
+    const legResult = getConferenceSeedEstimate(rosterData, row, eventName);
+    const parsed = parseComparablePerformance(legResult.value);
+    const shortName = (row[3] || '').toString().trim().split(/\s+/)[0]; // first name only for brevity
+    if (parsed === null) {
+      missingLegs.push(shortName);
+      return;
+    }
+    totalSeconds += parsed;
+    legBreakdown.push(shortName + ' ' + legResult.value);
+  });
+
+  if (missingLegs.length === 0) {
+    return {
+      value: formatSecondsAsTimeString(totalSeconds),
+      source: 'Legs: ' + legBreakdown.join(' + ')
+    };
+  }
+
+  const haveStr = legBreakdown.length > 0 ? (legBreakdown.join(', ') + '; ') : '';
+  return { value: '', source: haveStr + 'Missing: ' + missingLegs.join(', ') };
+}
+
+function getRelayTeamGroupKey(teamEntries, rosterData) {
+  if (!teamEntries || teamEntries.length === 0) return '';
+
+  const names = [];
+  teamEntries.forEach(row => {
+    const athleteKey = getRelayAthleteMatchKey(rosterData, row[3]);
+    if (athleteKey) names.push(athleteKey);
+  });
+
+  if (names.length === 0) return '';
+  names.sort();
+  return names.join('|');
+}
+
+function getRelayAthleteMatchKey(rosterData, athleteName) {
+  const raw = (athleteName || '').toString().trim();
+  if (!raw) return '';
+  const key = raw.toLowerCase();
+
+  const rosterRow = rosterData.slice(1).find(r => {
+    const rosterDisplay = (r[1] || '').toString().trim().toLowerCase();
+    const rosterFull = (r[0] || '').toString().trim().toLowerCase();
+    return rosterDisplay === key || rosterFull === key;
+  });
+
+  if (!rosterRow) return key;
+  return ((rosterRow[1] || rosterRow[0] || raw).toString().trim().toLowerCase());
+}
+
+function getRelayTeamMarkFromEntries(teamEntries, eventName) {
+  if (!teamEntries || teamEntries.length === 0) return '';
+
+  let best = '';
+  teamEntries.forEach(row => {
+    const rawMark = formatCellValue(row[5]);
+    if (!rawMark || rawMark === '-' || isNoMark(rawMark)) return;
+    if (!best || isBetter(rawMark, best, eventName)) {
+      best = rawMark;
+    }
+  });
+
+  return best;
+}
+
+function compareEventSeedValues(a, b, eventName) {
+  const aVal = parseComparablePerformance(a);
+  const bVal = parseComparablePerformance(b);
+
+  if (aVal === null && bVal === null) return 0;
+  if (aVal === null) return 1;
+  if (bVal === null) return -1;
+
+  if (isFieldEvent(eventName)) return bVal - aVal;
+  return aVal - bVal;
+}
+
+function formatConferenceSeedText(seedEstimate, eventName, includeConferenceSeeding) {
+  if (!includeConferenceSeeding || !isHeatSeedingEvent(eventName)) return '';
+  return seedEstimate ? ('  (' + seedEstimate + ')') : '  (TBD)';
+}
+
+/**
  * Format athlete names for conference roster.
  * - Default format: "First L" (first name + last initial)
  * - If multiple athletes have the same "First L", expand all to full last name
@@ -1834,6 +2190,212 @@ function formatConferenceNames(athleteNames) {
     const aFirst = a.split(' ')[0].toLowerCase();
     const bFirst = b.split(' ')[0].toLowerCase();
     return aFirst.localeCompare(bFirst);
+  });
+}
+
+function getEventResultPlaceTag(place, meetType) {
+  if (meetType === '8th Grade Pentathlon') return "";
+  if (place === "" || place === null || place === undefined) return "";
+  const placeText = formatCellValue(place);
+  if (!placeText) return "";
+  return "  [" + placeText + "]";
+}
+
+function parsePlaceRank(placeVal) {
+  if (placeVal === "" || placeVal === null || placeVal === undefined) return null;
+  const raw = formatCellValue(placeVal).toLowerCase();
+  if (!raw) return null;
+
+  const wordMap = {
+    first: 1,
+    second: 2,
+    third: 3,
+    fourth: 4,
+    fifth: 5,
+    sixth: 6,
+    seventh: 7,
+    eighth: 8,
+    ninth: 9,
+    tenth: 10
+  };
+
+  if (wordMap[raw]) return wordMap[raw];
+
+  const match = raw.match(/\b(\d+)(st|nd|rd|th)?\b/i);
+  if (!match) return null;
+  const parsed = parseInt(match[1], 10);
+  return isNaN(parsed) ? null : parsed;
+}
+
+function formatOrdinalPlace(placeNum) {
+  const n = parseInt(placeNum, 10);
+  if (!n) return "";
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return n + "th";
+  const rem10 = n % 10;
+  if (rem10 === 1) return n + "st";
+  if (rem10 === 2) return n + "nd";
+  if (rem10 === 3) return n + "rd";
+  return n + "th";
+}
+
+function extractPentathlonPointsText(raw) {
+  if (!raw) return "";
+  const pointsLabeled = raw.match(/(\d[\d,]*(?:\.\d+)?)\s*(pts?|points?)\b/i);
+  if (pointsLabeled) return pointsLabeled[1].replace(/,/g, '');
+
+  const numeric = raw.match(/\b(\d[\d,]*(?:\.\d+)?)\b/);
+  if (numeric) return numeric[1].replace(/,/g, '');
+
+  return "";
+}
+
+function extractPentathlonPlaceToken(raw) {
+  if (!raw) return "";
+  const normalized = raw.toString().trim().toLowerCase();
+  if (!normalized) return "";
+
+  const wordMatch = normalized.match(/\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b/i);
+  if (wordMatch) return wordMatch[1];
+
+  const ordinalMatch = normalized.match(/\b(\d+(?:st|nd|rd|th)?)\b/i);
+  if (ordinalMatch) return ordinalMatch[1];
+
+  return "";
+}
+
+function parsePentathlonPlacePoints(placeVal) {
+  if (placeVal === "" || placeVal === null || placeVal === undefined) {
+    return { placeNum: null, pointsText: "" };
+  }
+
+  const raw = formatCellValue(placeVal);
+  if (!raw) return { placeNum: null, pointsText: "" };
+  const trimmed = raw.toString().trim();
+
+  const tryParts = (left, right) => {
+    const leftPlace = parsePlaceRank(extractPentathlonPlaceToken(left));
+    const rightPlace = parsePlaceRank(extractPentathlonPlaceToken(right));
+    const leftPoints = extractPentathlonPointsText(left);
+    const rightPoints = extractPentathlonPointsText(right);
+
+    if (leftPlace !== null && rightPoints) return { placeNum: leftPlace, pointsText: rightPoints };
+    if (rightPlace !== null && leftPoints) return { placeNum: rightPlace, pointsText: leftPoints };
+    if (leftPlace !== null && leftPoints) return { placeNum: leftPlace, pointsText: leftPoints };
+    if (rightPlace !== null && rightPoints) return { placeNum: rightPlace, pointsText: rightPoints };
+    return null;
+  };
+
+  // Common separated formats: 3rd/3339, 3rd - 3339, 3rd, 3339, 3339 | 3rd.
+  const separators = ['/', '|', ';', ','];
+  for (let i = 0; i < separators.length; i++) {
+    const sep = separators[i];
+    if (trimmed.indexOf(sep) >= 0) {
+      const parts = trimmed.split(sep);
+      if (parts.length >= 2) {
+        const result = tryParts(parts[0], parts.slice(1).join(sep));
+        if (result) return result;
+      }
+    }
+  }
+
+  const dashMatch = trimmed.match(/^(.+?)\s[-]\s(.+)$/);
+  if (dashMatch) {
+    const dashResult = tryParts(dashMatch[1], dashMatch[2]);
+    if (dashResult) return dashResult;
+  }
+
+  // Textual format like "3rd place 3339 points" or reversed wording.
+  const placeToken = extractPentathlonPlaceToken(trimmed);
+  const placeNum = parsePlaceRank(placeToken);
+  const pointsText = extractPentathlonPointsText(trimmed);
+  if (placeNum !== null || pointsText) {
+    return { placeNum: placeNum, pointsText: pointsText };
+  }
+
+  // Any other free-form event mark should not be interpreted as overall place/points.
+  return { placeNum: null, pointsText: "" };
+}
+
+function renderPentathlonPlacePointsBlock(sheet, entryData, rosterData, meetNum, selectedGender, startRow, startCol) {
+  const byAthlete = {};
+
+  entryData.slice(1).forEach(r => {
+    if (r[0] != meetNum) return;
+    if (!matchesSelectedGender(r[1], selectedGender)) return;
+    const athlete = (r[3] || "").toString().trim();
+    if (!athlete) return;
+    const rosterRow = findRosterAthleteRow(rosterData, athlete);
+    const athleteGender = rosterRow && rosterRow[2] ? rosterRow[2].toString().trim() : "";
+
+    const fromPlace = parsePentathlonPlacePoints(r[8]);
+    const placeNum = fromPlace.placeNum;
+    const pointsText = fromPlace.pointsText;
+    if (placeNum === null && !pointsText) return;
+
+    const pointsVal = pointsText ? parseFloat(pointsText) : null;
+    const key = athlete.toLowerCase();
+    const curr = byAthlete[key];
+
+    const shouldReplace = !curr ||
+      (curr.placeNum === null && placeNum !== null) ||
+      (placeNum !== null && curr.placeNum !== null && placeNum < curr.placeNum) ||
+      (placeNum !== null && curr.placeNum !== null && placeNum === curr.placeNum && pointsVal !== null && (curr.pointsVal === null || pointsVal > curr.pointsVal)) ||
+      (placeNum === null && curr.placeNum === null && pointsVal !== null && (curr.pointsVal === null || pointsVal > curr.pointsVal));
+
+    if (shouldReplace) {
+      byAthlete[key] = {
+        athlete: athlete,
+        athleteGender: athleteGender,
+        placeNum: placeNum,
+        pointsText: pointsText,
+        pointsVal: pointsVal
+      };
+    }
+  });
+
+  const rows = Object.keys(byAthlete).map(k => byAthlete[k]);
+
+  rows.sort((a, b) => {
+    if (a.placeNum === null && b.placeNum !== null) return 1;
+    if (a.placeNum !== null && b.placeNum === null) return -1;
+    if (a.placeNum !== b.placeNum) return a.placeNum - b.placeNum;
+    return a.athlete.toLowerCase().localeCompare(b.athlete.toLowerCase());
+  });
+
+  sheet.getRange(startRow, startCol).setValue("Meet Place");
+  sheet.getRange(startRow, startCol + 1, 1, 3).merge().setValue("Athlete");
+  sheet.getRange(startRow, startCol + 4).setValue("Total Points");
+  sheet.getRange(startRow, startCol, 1, 5)
+    .setFontWeight("bold")
+    .setBackground("#e0e0e0")
+    .setHorizontalAlignment("center")
+    .setBorder(true, true, true, true, true, true);
+
+  if (rows.length === 0) {
+    sheet.getRange(startRow + 1, startCol, 1, 5)
+      .merge()
+      .setValue("No pentathlon place/points found in Place cells")
+      .setFontStyle("italic")
+      .setFontColor("#666666")
+      .setHorizontalAlignment("center")
+      .setBorder(true, true, true, true, true, true);
+    return;
+  }
+
+  rows.forEach((r, idx) => {
+    const outRow = startRow + 1 + idx;
+    sheet.getRange(outRow, startCol)
+      .setValue(r.placeNum !== null ? (formatOrdinalPlace(r.placeNum) + " Place" + (r.athleteGender ? (" (" + r.athleteGender + ")") : "")) : "")
+      .setBorder(true, true, true, true, true, true);
+    sheet.getRange(outRow, startCol + 1, 1, 3)
+      .merge()
+      .setValue(r.athlete)
+      .setBorder(true, true, true, true, true, true);
+    sheet.getRange(outRow, startCol + 4)
+      .setValue(r.pointsText || "")
+      .setHorizontalAlignment("right")
+      .setBorder(true, true, true, true, true, true);
   });
 }
 
@@ -2046,6 +2608,25 @@ function getRelayFieldTeamSchoolRec(recordsData, gender, eventName) {
     if (val) return val;
   }
   return "";
+}
+
+function getEventFormSchoolRecDisplay(recordsData, selectedGender, eventName, meetType, defaultSchoolRec) {
+  if (isCombinedGenderSelection(selectedGender) && meetType === '8th Grade Pentathlon') {
+    const girlsRec = formatCellValue(recordsData.find(r => r[0] == 'Girls' && r[1] == eventName)?.[3]) || '';
+    const boysRec = formatCellValue(recordsData.find(r => r[0] == 'Boys' && r[1] == eventName)?.[3]) || '';
+    if (girlsRec && boysRec) return 'G: ' + girlsRec + ' | B: ' + boysRec;
+    if (girlsRec) return 'G: ' + girlsRec;
+    if (boysRec) return 'B: ' + boysRec;
+    return '';
+  }
+  return defaultSchoolRec || '';
+}
+
+function getAthleteSchoolRecForEvent(recordsData, selectedGender, athleteGender, eventName, meetType, defaultSchoolRec) {
+  if (isCombinedGenderSelection(selectedGender) && meetType === '8th Grade Pentathlon') {
+    return formatCellValue(recordsData.find(r => r[0] == athleteGender && r[1] == eventName)?.[3]) || null;
+  }
+  return defaultSchoolRec || null;
 }
 
 function applyRelayPrHighlight(rowRange, resultCell, res, pr, ev) {
@@ -2594,6 +3175,7 @@ function generatePlacersExport() {
   const home = ss.getSheetByName('Home');
   const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
   const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const recordsData = ss.getSheetByName('School_Records').getDataRange().getValues();
   const out = getOrCreateSheet(ss, 'Placers_Export');
 
   const defaultMeet = home ? (home.getRange('B3').getValue() || '') : '';
@@ -2641,6 +3223,7 @@ function generatePlacersExport() {
   const meetRow = schedData.find(r => r[0] == meetNum);
   const meetName = (meetRow && meetRow[6]) ? meetRow[6].toString() : ('Meet #' + meetNum);
   const meetDateDisplay = meetRow ? formatMeetDateForTitle(meetRow[1]) : '';
+  const meetType = meetRow ? getMeetType(meetRow) : '';
 
   const parseStandingSummary = (standingVal) => {
     const raw = (standingVal === null || standingVal === undefined) ? '' : standingVal.toString().trim();
@@ -2733,6 +3316,90 @@ function generatePlacersExport() {
     }
     const parsed = parseFloat(s.replace(/[^\d.]/g, ''));
     return isNaN(parsed) ? null : parsed;
+  };
+
+  const getPlacerSchoolRec = (rowGender, eventName) => {
+    if (meetType === 'Relays' && isFieldEvent(eventName)) {
+      return getRelayFieldTeamSchoolRec(recordsData, rowGender, eventName) || '';
+    }
+    return formatCellValue(recordsData.find(r => r[0] == rowGender && r[1] == eventName)?.[3]) || '';
+  };
+
+  const buildPlacerJson = (r) => {
+    const schoolRec = getPlacerSchoolRec(r[1], r[2]);
+    const brokeSchoolRecord = !!(schoolRec && isBetter(r[6], schoolRec, r[2]));
+    return {
+      place: r[5],
+      athlete: r[3],
+      mark: r[6],
+      schoolRecord: brokeSchoolRecord,
+      previousSchoolRecord: schoolRec || null,
+      recordType: brokeSchoolRecord ? 'schoolRecord' : null
+    };
+  };
+
+  const isSpecialRelayRecordEvent = (eventName) => {
+    return eventName === 'Distance Relay' || eventName === 'Sprint Relay' || eventName === 'Special Relay' || eventName === 'Hurdle Shuttle';
+  };
+
+  const getEntryRowForPlacedRow = (placedRow) => {
+    return entryData.slice(1).find(e =>
+      e[0] == placedRow[0] &&
+      e[1] == placedRow[1] &&
+      e[2] == placedRow[2] &&
+      e[3] == placedRow[3] &&
+      (e[4] || '') == (placedRow[4] || '')
+    ) || null;
+  };
+
+  const getTeamEntryRows = (teamRows) => teamRows.map(getEntryRowForPlacedRow).filter(Boolean);
+
+  const getGroupedTeamMark = (teamRows) => {
+    const first = teamRows[0];
+    if (meetType === 'Relays' && isFieldEvent(first[2])) {
+      const teamEntryRows = getTeamEntryRows(teamRows);
+      const teamTotalInches = sumRelayFieldTeamDistanceInches(teamEntryRows);
+      return (teamTotalInches !== null) ? formatFeetInchesFromInches(teamTotalInches) : first[6];
+    }
+    return first[6];
+  };
+
+  const getGroupedTeamRecordInfo = (teamRows) => {
+    const first = teamRows[0];
+    const eventName = first[2];
+    const rowGender = first[1];
+
+    if (meetType === 'Relays' && isFieldEvent(eventName)) {
+      const schoolRec = formatCellValue(recordsData.find(r => r[0] == rowGender && r[1] == eventName)?.[3]) || '';
+      if (!schoolRec) return { isRecord: false, recordType: null, previousSchoolRecord: null, recordAthletes: [] };
+
+      const recordAthletes = getTeamEntryRows(teamRows)
+        .filter(e => {
+          const mark = formatCellValue(e[5]);
+          return mark && !isNoMark(mark) && isBetter(mark, schoolRec, eventName);
+        })
+        .map(e => ({
+          athlete: e[3],
+          mark: formatCellValue(e[5])
+        }));
+
+      return {
+        isRecord: recordAthletes.length > 0,
+        recordType: recordAthletes.length > 0 ? 'individualFieldRecord' : null,
+        previousSchoolRecord: recordAthletes.length > 0 ? schoolRec : null,
+        recordAthletes: recordAthletes
+      };
+    }
+
+    const teamMark = getGroupedTeamMark(teamRows);
+    const schoolRec = getPlacerSchoolRec(rowGender, eventName);
+    const brokeSchoolRecord = !!(schoolRec && isBetter(teamMark, schoolRec, eventName));
+    return {
+      isRecord: brokeSchoolRecord,
+      recordType: brokeSchoolRecord ? (isSpecialRelayRecordEvent(eventName) ? 'specialRelayRecord' : 'schoolRecord') : null,
+      previousSchoolRecord: brokeSchoolRecord ? schoolRec : null,
+      recordAthletes: []
+    };
   };
 
   const placedRows = [];
@@ -2838,28 +3505,109 @@ function generatePlacersExport() {
     grouped[key].push(r);
   });
 
-  const aiLines = [];
-  aiLines.push('Meet: ' + meetName + (meetDateDisplay ? (' (' + meetDateDisplay + ')') : '') + ' | Placers through place ' + maxPlace);
-  aiLines.push('Team Summary:');
-  if (genderFilter === 'Combined' || genderFilter === 'Girls') {
-    aiLines.push('- Girls place: ' + (girlsSummary.place || 'not set') + ' | points: ' + (girlsSummary.points || 'not set'));
-  }
-  if (genderFilter === 'Combined' || genderFilter === 'Boys') {
-    aiLines.push('- Boys place: ' + (boysSummary.place || 'not set') + ' | points: ' + (boysSummary.points || 'not set'));
-  }
-  aiLines.push('');
-
+  const simplifiedFinishes = [];
+  const schoolRecordEntries = [];
+  const relayEventRecordEntries = [];
   Object.keys(grouped).sort().forEach(key => {
     const rows = grouped[key].sort((a, b) => a[5] - b[5]);
-    const gender = rows[0][1];
-    const event = rows[0][2];
-    aiLines.push(gender + ' - ' + event);
-    rows.forEach(r => {
-      const teamTxt = r[4] ? (' Team ' + r[4]) : '';
-      aiLines.push(r[5] + '. ' + r[3] + teamTxt + ' - ' + r[6]);
-    });
-    aiLines.push('');
+    const hasTeamIds = rows.some(r => r[4]);
+
+    if (hasTeamIds) {
+      const teamGroups = {};
+      rows.forEach(r => {
+        const teamKey = (r[4] || 'Unassigned').toString();
+        if (!teamGroups[teamKey]) teamGroups[teamKey] = [];
+        teamGroups[teamKey].push(r);
+      });
+
+      Object.keys(teamGroups).sort((a, b) => {
+        const na = parseInt(a, 10);
+        const nb = parseInt(b, 10);
+        if (!isNaN(na) && !isNaN(nb)) return na - nb;
+        return a.localeCompare(b);
+      }).forEach(teamId => {
+        const teamRows = teamGroups[teamId];
+        const first = teamRows[0];
+        const recordInfo = getGroupedTeamRecordInfo(teamRows);
+        const finish = {
+          gender: first[1],
+          event: first[2],
+          place: first[5],
+          team: teamId,
+          athletes: teamRows.map(r => r[3]),
+          mark: getGroupedTeamMark(teamRows)
+        };
+        simplifiedFinishes.push(finish);
+
+        if (recordInfo.isRecord) {
+          const recordEntry = {
+            gender: finish.gender,
+            event: finish.event,
+            place: finish.place,
+            team: finish.team,
+            athletes: finish.athletes,
+            mark: finish.mark,
+            recordType: recordInfo.recordType,
+            previousSchoolRecord: recordInfo.previousSchoolRecord
+          };
+          if (recordInfo.recordAthletes.length > 0) recordEntry.recordAthletes = recordInfo.recordAthletes;
+
+          if (meetType === 'Relays' && recordInfo.recordType === 'specialRelayRecord') {
+            relayEventRecordEntries.push(recordEntry);
+          } else {
+            const schoolRecordEntry = {
+              gender: finish.gender,
+              event: finish.event,
+              previousSchoolRecord: recordInfo.previousSchoolRecord
+            };
+            if (recordInfo.recordAthletes.length > 0) schoolRecordEntry.recordAthletes = recordInfo.recordAthletes;
+            schoolRecordEntries.push(schoolRecordEntry);
+          }
+        }
+      });
+    } else {
+      rows.forEach(r => {
+        const recordInfo = buildPlacerJson(r);
+        const finish = {
+          gender: r[1],
+          event: r[2],
+          place: r[5],
+          athlete: r[3],
+          mark: r[6]
+        };
+        simplifiedFinishes.push(finish);
+
+        if (recordInfo.schoolRecord) {
+          schoolRecordEntries.push({
+            gender: finish.gender,
+            event: finish.event,
+            previousSchoolRecord: recordInfo.previousSchoolRecord,
+            recordAthletes: [{ athlete: finish.athlete, mark: finish.mark }]
+          });
+        }
+      });
+    }
   });
+
+  const placersJson = {
+    meet: meetName,
+    date: meetDateDisplay || '',
+    genderFilter: genderFilter,
+    maxPlace: maxPlace,
+    teamResults: {
+      girls: (genderFilter === 'Combined' || genderFilter === 'Girls')
+        ? { place: girlsSummary.place || 'not set', points: girlsSummary.points || 'not set' }
+        : null,
+      boys: (genderFilter === 'Combined' || genderFilter === 'Boys')
+        ? { place: boysSummary.place || 'not set', points: boysSummary.points || 'not set' }
+        : null
+    },
+    finishes: simplifiedFinishes,
+    schoolRecords: schoolRecordEntries,
+    relayEventRecords: meetType === 'Relays' ? relayEventRecordEntries : [],
+    sanityFlags: uniqueFlags
+  };
+  const placersJsonText = JSON.stringify(placersJson, null, 2);
 
   out.clear();
   out.getRange(1, 1, out.getMaxRows(), 12).clearNote();
@@ -2890,14 +3638,14 @@ function generatePlacersExport() {
 
   const aiStart = Math.max(placedRows.length + 6, 9);
   out.getRange(aiStart, 1, 1, 9).merge()
-    .setValue('AI / EMAIL COPY BLOCK')
+    .setValue('JSON EXPORT BLOCK')
     .setFontWeight('bold').setBackground('#d9ead3');
   out.getRange(aiStart + 1, 1, 1, 9).merge()
-    .setValue(aiLines.join('\n'))
+    .setValue(placersJsonText)
     .setWrap(true)
     .setVerticalAlignment('top')
     .setBackground('#f3fff3');
-  out.setRowHeight(aiStart + 1, Math.max(160, aiLines.length * 18));
+  out.setRowHeight(aiStart + 1, Math.max(220, placersJsonText.split('\n').length * 18));
 
   const sanityStart = aiStart + 3;
   out.getRange(sanityStart, 1, 1, 9).merge()
