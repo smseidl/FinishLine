@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.112";
+const VERSION = "v2.113";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -468,8 +468,8 @@ function generateLineupReport() {
   const meetDateDisplay = formatMeetDateForTitle(meetRow?.[1]);
   const titlePrefix = meetDateDisplay ? (meetName + " — " + meetDateDisplay) : meetName;
 
-  if (isCombined && meetType !== '8th Grade Pentathlon') {
-    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon. Select Girls or Boys for other meet types.');
+  if (isCombined && meetType !== '8th Grade Pentathlon' && meetType !== 'Time Trials') {
+    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon and Time Trials. Select Girls or Boys for other meet types.');
     return false;
   }
 
@@ -927,8 +927,8 @@ function generateEventFormReport() {
   const isCombined  = isCombinedGenderSelection(gender);
   const genderLabel = getOutputGenderLabel(gender);
 
-  if (isCombined && meetType !== '8th Grade Pentathlon') {
-    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon. Select Girls or Boys for other meet types.');
+  if (isCombined && meetType !== '8th Grade Pentathlon' && meetType !== 'Time Trials') {
+    SpreadsheetApp.getUi().alert('Combined output is only supported for 8th Grade Pentathlon and Time Trials. Select Girls or Boys for other meet types.');
     return false;
   }
 
