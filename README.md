@@ -34,8 +34,9 @@ Generates printable Lineup and Event Form reports from Google Sheets data.
    - `Roster` — athlete list with PRs
    - `School_Records` — record book
    - `Historical_PRs` — past-year PRs for year-over-year comparisons
-   - `Lineup_View` and `Event_Form_Printable` — generated output
-   - `Top_Marks` and `Athlete_Recaps` — additional generated reports
+   - `Lineup_View` and `Event_Form_Printable` — printable meet output
+   - `Athlete_Recaps` — year-end athlete recap report
+   - `Output` — shared output tab for Top Marks, Filtered Results, Placers Export, and Year-End Summary
 
 ### Step 4 — Set Up the Installable Trigger ⚠️ (required)
 
@@ -90,13 +91,46 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 
 ---
 
-## Copying to a New Season
+## End-of-Season / New Season Workflow
 
-1. **File → Make a copy** of the spreadsheet.
-2. Clear `Data_Entry` rows 2+ (keep the header row).
-3. Update `Schedule` with new meets.
-4. Re-run **1. Build / Rebuild** to reset the output tabs.
-5. **Re-create the installable trigger** (Step 4 above) — triggers do not copy with the sheet.
+Use **🏁 FINISH LINE → 13. Create Next Season File** to run the full end-of-year workflow in one step.
+
+### What it does automatically
+
+| Step | Action |
+|------|--------|
+| 1 | Captures school record baseline on the **current** file and clears prior season record highlighting so new records stand out |
+| 2 | Copies all Roster PRs to `Historical_PRs` tagged with the current season year |
+| 3 | Clears `Data_Entry` rows 2+ |
+| 4 | Clears `Schedule` rows 2+ |
+| 5 | Clears `Roster` rows 2+ and adds a note in A2 to copy PRs from `Historical_PRs` for returning athletes |
+| 6 | Seeds a fresh `School_Records` baseline in the new file |
+| 7 | Clears all generated output tabs (`Lineup_View`, `Event_Form_Printable`, `Athlete_Recaps`, `Output`, etc.) |
+| 8 | Clears `Girls_Results` and `Boys_Results` backup tabs (if they exist) |
+| 9 | Resets Home tab selections |
+
+### After running
+
+1. **Re-create the installable trigger** (`onEditInstallable`) — triggers do not copy with the sheet.
+2. Enter Roster athletes for the new season.
+3. Copy PRs from `Historical_PRs` (filter by the archived year) for returning athletes.
+4. If needed, run **15. Purge Graduated Athletes from Historical PRs** after the new roster is entered.
+5. Enter `Schedule` meets for the new season.
+6. Run **1. Build / Rebuild** if you changed any sheet structure.
+
+### Girls_Results / Boys_Results Backup Tabs (optional)
+
+If you create tabs named `Girls_Results` and `Boys_Results` in your spreadsheet, they serve as
+end-of-season backup copies of final `Data_Entry` results (one per gender). The coach can keep the
+final filtered results there for reference before running **13. Create Next Season File**.
+The automated workflow will clear these tabs in the new copy so they are ready for the next season.
+
+### School Record Baseline (manual option)
+
+**🏁 FINISH LINE → 14. Capture School Record Baseline** can also be run independently at any time.
+It writes the current `School_Records` values into baseline columns used by the Year-End Summary
+for counting new school records set during the season. When it runs, it also clears prior season
+highlight formatting from the `School_Records` data rows so new highlights are visually obvious.
 
 ---
 
@@ -108,11 +142,15 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 |-----------|--------|
 | **3. Generate Printable Lineup** | Pre-meet lineup with PRs; also writes a By-Athlete view and Conference Lineup section |
 | **4. Generate Printable Event/Result Forms** | Post-meet event forms with results, PR/record highlights |
-| **7. Generate Top Marks (YTD)** | Year-to-date top N performers per event (set N in the Home tab Top N field) |
+| **7. Generate Top Marks (YTD)** | Year-to-date top N performers per event (set N in the Home tab Top N field), written to `Output` |
 | **8. Generate All Athlete Recaps** | Year-end recap per athlete: meet-by-meet results + year-over-year PR table |
-| **9. Generate Filtered Results** | Filter results by grade and/or event with multiple sort options |
-| **10. Export Event Placers (Email/AI)** | Export placed results formatted for email or AI use; includes sanity checks |
+| **9. Generate Filtered Results** | Filter results by grade and/or event with multiple sort options, written to `Output` |
+| **10. Export Event Placers (Email/AI)** | Export placed results formatted for email or AI use; includes sanity checks, written to `Output` |
 | **11. Build Time-Trial List (100M)** | Builds a 100 M Dash entry list for athletes not in a main meet (time-trial seeding) |
+| **12. Generate Year-End Summary** | Writes PR totals and school-record details (event, athlete(s), mark, meet) to `Output` |
+| **13. Create Next Season File** | Full end-of-year workflow: captures baseline, archives PRs to `Historical_PRs`, clears `Data_Entry` / `Schedule` / `Roster` / output tabs / backup result tabs, and seeds new-season baseline |
+| **14. Capture School Record Baseline** | Copies current `School_Records` `Record` values into baseline columns used by Year-End Summary calculations (also runs automatically as step 1 of item 13) |
+| **15. Purge Graduated Athletes from Historical PRs** | Removes `Historical_PRs` rows for athletes who are no longer in the current `Roster` |
 
 ### Conference Seeding Mode
 
@@ -126,6 +164,9 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 |------|--------|
 | **Check PR Setup (debug)** | Finds athletes in `Data_Entry` with no matching Roster entry, and Roster rows missing a Display Name |
 | **Check Meet Roster (debug)** | For a specific meet/gender, lists any `Data_Entry` names that don't match the Roster |
+| **Check Athlete Recaps (debug)** | Verifies every Roster athlete has a corresponding recap block in `Athlete_Recaps`; lists any missing by Roster row number |
+
+Use **15. Purge Graduated Athletes from Historical PRs** after the new-season roster is entered if you want `Historical_PRs` to keep only returning athletes.
 
 ---
 
@@ -134,12 +175,28 @@ Fill in the data tabs (row 2 onward — **never edit row 1 headers**):
 ```
 FinishLine/
 ├── scripts/
-│   └── FinishLine.gs    ← paste this into Apps Script
+│   └── FinishLine.gs              ← paste this into Apps Script
+├── Certificate.html               ← school-record certificate template (individual events)
+├── RelayMeet_Certificate.html     ← school-record certificate template (relay events; includes Relay Splits line)
+├── OLOL Logo.jpg                  ← school logo used by the certificate templates
 ├── instructions/
-│   ├── DEVELOPER.md     ← developer reference: all functions documented
+│   ├── DEVELOPER.md               ← developer reference: all functions documented
 │   └── FINISHLINE_CONTEXT.md
 └── README.md
 ```
+
+### Certificate Templates
+
+Two HTML certificate templates are included for printing school-record awards:
+
+| File | Use |
+|------|-----|
+| `Certificate.html` | Individual-event school records (Time / Date line) |
+| `RelayMeet_Certificate.html` | Relay records — includes an extra **Relay Splits** line below the team time |
+
+Open either file in a browser and use the **Print Certificate** button. Edit the athlete name,
+event, time, splits, and date directly in the HTML. `OLOL Logo.jpg` must be in the same folder
+for the logo to appear. Both templates are formatted for US Letter landscape printing.
 
 ---
 

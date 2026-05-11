@@ -65,7 +65,7 @@ FinishLine/
 
 | Constant | Value | Purpose |
 |----------|-------|---------|
-| `VERSION` | `"v2.112"` | Displayed in UI; bump on every change |
+| `VERSION` | `"v2.114"` | Displayed in UI; bump on every change |
 | `HOME_STATUS_CELL` | `"A11:B11"` | Merged status cell on the Home tab |
 | `PDF_FOLDER_PROP_KEY` | `"FINISHLINE_PDF_FOLDER_ID"` | Script property key for PDF Drive folder (deprecated) |
 | `CONF_SEED_MODE_PROP_KEY` | `"FINISHLINE_CONF_SEED_MODE"` | Script property key for conference seeding mode |
@@ -338,6 +338,37 @@ Prompts for: source meet # to exclude, target time-trial meet #, gender.
 Confirms before writing. Generates stub Data_Entry rows (no result) with an
 auto-generated note. Useful for seeding athletes into 100 M time trial heats
 alongside a relay meet.
+
+---
+
+#### `generateYearEndSummary()`
+
+Generates a `Year_End_Summary` tab for end-of-season reporting.
+
+Output includes:
+- Total athletes, meets, and events with results
+- Season PR improvement counts from `Data_Entry`
+- School record break count
+- Detail table for school records: gender, event, athlete(s), mark/time, meet #, meet name, and prior record context
+
+Notes:
+- PR counts are based on progression of entered season results.
+- School record detection compares season performances against current `School_Records` baseline.
+
+---
+
+#### `createNextSeasonFile()`
+
+Creates a new spreadsheet copy for the next season and performs a lightweight reset.
+
+Actions:
+- Prompts for new file name
+- Copies the current spreadsheet file via Drive
+- Clears `Data_Entry` rows 2+
+- Clears generated output tabs (`Lineup_View`, `Event_Form_Printable`, `Top_Marks`, `Athlete_Recaps`, `Filtered_Results`, `Placers_Export`, `Year_End_Summary`)
+- Resets Home tab selections (`B3`, `B4`, `B5`) and status cell
+
+Displays the new file URL and reminder to re-create the installable trigger (`onEditInstallable`) because triggers do not copy.
 
 ---
 

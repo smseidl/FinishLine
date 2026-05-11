@@ -31,7 +31,7 @@
 
 // ── VERSION ──────────────────────────────────────────────────
 // Update this one value only when bumping the version.
-const VERSION = "v2.113";
+const VERSION = "v2.123";
 
 // ── HOME TAB LAYOUT ──────────────────────────────────────────
 const HOME_STATUS_CELL = "A11:B11"; // Status/feedback row on the Home tab
@@ -92,9 +92,14 @@ function onOpen() {
     .addItem('10. Export Event Placers (Email/AI)', 'generatePlacersExport')
     .addSeparator()
     .addItem('11. Build Time-Trial List (100M)',  'buildTimeTrialRelayList')
+    .addItem('12. Generate Year-End Summary',      'generateYearEndSummary')
+    .addItem('13. Create Next Season File',        'createNextSeasonFile')
+    .addItem('14. Capture School Record Baseline', 'captureSeasonRecordSnapshot')
     .addSeparator()
     .addItem('Check PR Setup (debug)',        'checkPRSetup')
-    .addItem('Check Meet Roster (debug)',     'checkMeetRoster');
+    .addItem('Check Meet Roster (debug)',     'checkMeetRoster')
+    .addItem('Check Athlete Recaps (debug)',  'checkAthleteRecapCoverage')
+    .addItem('Purge Graduated Athletes from Historical PRs', 'purgeGraduatedAthletesFromHistorical');
 
   if (ENABLE_PDF_EXPORT) {
     menu
@@ -282,17 +287,17 @@ function fullInitialize() {
   roster.setFrozenColumns(1);
 
   // ── SCHOOL RECORDS ──
-  // Columns: Gender, Event, Athlete, Record, Year, Notes
-  // Only Record (col D, index 3) is used by report logic — Year/Notes are history/reference only.
+  // Columns: Gender, Event, Athlete, Record, Year, Notes, Baseline Record, Baseline Captured
+  // Baseline columns are used for year-end school-record break counting.
   const records = getOrCreateSheet(ss, 'School_Records');
-  const recordHeaders = ["Gender", "Event", "Athlete", "Record", "Year", "Notes"];
+  const recordHeaders = ["Gender", "Event", "Athlete", "Record", "Year", "Notes", "Baseline Record", "Baseline Captured"];
   try {
-    const currRecordHeaders = records.getRange(1, 1, 1, 6).getValues()[0];
+    const currRecordHeaders = records.getRange(1, 1, 1, 8).getValues()[0];
     const headersMatch = recordHeaders.every((h, i) => currRecordHeaders[i] === h);
     if (!headersMatch) {
-      records.getRange(1, 1, 1, 6).setValues([recordHeaders]);
+      records.getRange(1, 1, 1, 8).setValues([recordHeaders]);
     }
-    records.getRange(1, 1, 1, 6)
+    records.getRange(1, 1, 1, 8)
       .setBackground("#bf9000").setFontColor("white").setFontWeight("bold");
   } catch(e) {
     if (e.message.includes('typed columns')) {
@@ -304,6 +309,8 @@ function fullInitialize() {
   }
   records.setColumnWidth(5, 80);
   records.setColumnWidth(6, 240);
+  records.setColumnWidth(7, 120);
+  records.setColumnWidth(8, 170);
 
   // ── HISTORICAL PRS ──
   // Storage for past-year PRs — one row per athlete per year.
@@ -381,6 +388,12 @@ function fullInitialize() {
   home.getRange("A12:B12").merge()
     .setValue("── Future Features ───────────────────────────")
     .setFontStyle("italic").setFontColor("#aaaaaa").setFontSize(9);
+  home.setRowHeight(12, 18);
+  home.getRange("A13:B13").merge()
+    .setValue("After entering the new roster, run Purge Graduated Athletes from Historical PRs.")
+    .setFontSize(9).setFontColor("#666666").setFontStyle("italic")
+    .setHorizontalAlignment("left").setVerticalAlignment("middle");
+  home.setRowHeight(13, 20);
 
   // ── SETUP CHECKLIST ──
   // Visible reminder for first-time setup and when copying to a new season.
@@ -425,11 +438,11 @@ function fullInitialize() {
   ss.getSheetByName('Historical_PRs')   && ss.getSheetByName('Historical_PRs').setTabColor('#00bcd4');
   ss.getSheetByName('Lineup_View')      && ss.getSheetByName('Lineup_View').setTabColor('#ff6d00');
   ss.getSheetByName('Event_Form_Printable') && ss.getSheetByName('Event_Form_Printable').setTabColor('#ff6d00');
-  ss.getSheetByName('Top_Marks')        && ss.getSheetByName('Top_Marks').setTabColor('#674ea7');
+  ss.getSheetByName('Output')           && ss.getSheetByName('Output').setTabColor('#674ea7');
   ss.getSheetByName('Athlete_Recaps')   && ss.getSheetByName('Athlete_Recaps').setTabColor('#674ea7');
 
   // ── PRINTABLE TABS ── (pure output — selection is on Home tab)
-  ['Lineup_View', 'Event_Form_Printable', 'Top_Marks', 'Athlete_Recaps'].forEach(name => {
+  ['Lineup_View', 'Event_Form_Printable', 'Athlete_Recaps', 'Output'].forEach(name => {
     const sh = getOrCreateSheet(ss, name);
     sh.clear();
     sh.getRange(1, 1, sh.getMaxRows(), 9).clearNote();
@@ -2406,7 +2419,7 @@ function renderPentathlonPlacePointsBlock(sheet, entryData, rosterData, meetNum,
  */
 function isNoMark(val) {
   if (!val) return false;
-  return /^(-|dnr|dns|dq|nh|nm|nd|scratch|x|na|cancell?ed)$/i.test(val.toString().trim());
+  return /^(-|dnr|dns|dnf|did\s*not\s*finish|dq|nh|nm|nd|scratch|x|na|cancell?ed)$/i.test(val.toString().trim());
 }
 
 function isCombinedGenderSelection(gender) {
@@ -2658,6 +2671,10 @@ function getOrCreateSheet(ss, name) {
   return sh;
 }
 
+function getSharedOutputSheet(ss) {
+  return getOrCreateSheet(ss, 'Output');
+}
+
 function applyReportLayout(sh) {
   sh.setColumnWidth(1, 260);
   sh.setColumnWidth(2, 110);
@@ -2866,6 +2883,106 @@ function checkMeetRoster() {
 }
 
 /**
+ * Verifies that every athlete row in Roster has a corresponding recap header
+ * in Athlete_Recaps (header text is Display Name, or Athlete Name fallback).
+ * Run from the 🏁 FINISH LINE menu → "Check Athlete Recaps (debug)".
+ */
+function checkAthleteRecapCoverage() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const rosterSheet = ss.getSheetByName('Roster');
+  const recapSheet = ss.getSheetByName('Athlete_Recaps');
+
+  if (!rosterSheet || !recapSheet) {
+    ui.alert('❌ Missing required tab(s). Need both Roster and Athlete_Recaps.');
+    return;
+  }
+
+  const rosterData = rosterSheet.getDataRange().getValues();
+  const lastRecapRow = recapSheet.getLastRow();
+  const recapColA = lastRecapRow > 0 ? recapSheet.getRange(1, 1, lastRecapRow, 1).getValues() : [];
+
+  const rosterAthletes = rosterData.slice(1)
+    .map((r, idx) => {
+      const athleteName = (r[0] || '').toString().trim();
+      const displayName = (r[1] || '').toString().trim();
+      const recapHeader = (displayName || athleteName).trim();
+      return {
+        rosterRow: idx + 2,
+        athleteName: athleteName,
+        displayName: displayName,
+        recapHeader: recapHeader,
+        key: recapHeader.toLowerCase()
+      };
+    })
+    .filter(a => a.recapHeader);
+
+  if (rosterAthletes.length === 0) {
+    ui.alert('⚠️ No athletes found in Roster tab.');
+    return;
+  }
+
+  // Count expected occurrences by recap header (supports duplicate names).
+  const expectedCounts = {};
+  rosterAthletes.forEach(a => {
+    expectedCounts[a.key] = (expectedCounts[a.key] || 0) + 1;
+  });
+
+  // Count recap headers found in Athlete_Recaps col A that match expected names.
+  const foundCounts = {};
+  recapColA.forEach(row => {
+    const text = (row[0] || '').toString().trim();
+    if (!text) return;
+    const key = text.toLowerCase();
+    if (expectedCounts[key]) {
+      foundCounts[key] = (foundCounts[key] || 0) + 1;
+    }
+  });
+
+  // Resolve missing rows in roster order.
+  const remainingFound = {};
+  Object.keys(foundCounts).forEach(k => {
+    remainingFound[k] = foundCounts[k];
+  });
+
+  const missing = [];
+  rosterAthletes.forEach(a => {
+    const left = remainingFound[a.key] || 0;
+    if (left > 0) {
+      remainingFound[a.key] = left - 1;
+    } else {
+      missing.push(a);
+    }
+  });
+
+  const matchedCount = rosterAthletes.length - missing.length;
+  if (missing.length === 0) {
+    ui.alert(
+      '✅ Athlete Recaps coverage looks good.\n\n' +
+      'Matched: ' + matchedCount + ' / ' + rosterAthletes.length
+    );
+    return;
+  }
+
+  const preview = missing.slice(0, 25).map(a => {
+    const who = a.displayName || a.athleteName;
+    return '❌ Row ' + a.rosterRow + ': ' + who;
+  });
+
+  const more = missing.length > 25
+    ? '\n...and ' + (missing.length - 25) + ' more.'
+    : '';
+
+  ui.alert(
+    '⚠️ Athlete Recaps missing roster entries.\n\n' +
+    'Matched: ' + matchedCount + ' / ' + rosterAthletes.length + '\n\n' +
+    preview.join('\n') +
+    more +
+    '\n\nRun "Generate All Athlete Recaps" and re-check.'
+  );
+}
+
+/**
  * Generate a generic filtered results export by joining Data_Entry with
  * Roster grade. Useful for requests like: "all 100/200 times for 5th grade".
  *
@@ -2880,7 +2997,7 @@ function generateFilteredResults() {
   const ui = SpreadsheetApp.getUi();
   const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
   const rosterData = ss.getSheetByName('Roster').getDataRange().getValues();
-  const out = getOrCreateSheet(ss, 'Filtered_Results');
+  const out = getSharedOutputSheet(ss);
 
   const gradeResp = ui.prompt(
     'Generate Filtered Results',
@@ -3159,7 +3276,7 @@ function generateFilteredResults() {
 
   ui.alert(
     '✅ Filtered Results Ready',
-    filtered.length + ' row(s) written to Filtered_Results.' + unmatchedMsg,
+    filtered.length + ' row(s) written to Output.' + unmatchedMsg,
     ui.ButtonSet.OK
   );
 }
@@ -3176,7 +3293,7 @@ function generatePlacersExport() {
   const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
   const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
   const recordsData = ss.getSheetByName('School_Records').getDataRange().getValues();
-  const out = getOrCreateSheet(ss, 'Placers_Export');
+  const out = getSharedOutputSheet(ss);
 
   const defaultMeet = home ? (home.getRange('B3').getValue() || '') : '';
   const defaultGender = home ? (home.getRange('B4').getValue() || '') : '';
@@ -3682,7 +3799,7 @@ function generatePlacersExport() {
 
   ui.alert(
     '✅ Placers Export Ready',
-    placedRows.length + ' placed row(s) written to Placers_Export.' + sanityMsg,
+    placedRows.length + ' placed row(s) written to Output.' + sanityMsg,
     ui.ButtonSet.OK
   );
 }
@@ -3809,6 +3926,530 @@ function buildTimeTrialRelayList() {
     '✅ Time-Trial Rows Added',
     rowsToAppend.length + ' entries appended to Data_Entry for Meet #' + targetMeet + ' (' + gender + ')\n' +
     'Event: ' + eventName,
+    ui.ButtonSet.OK
+  );
+}
+
+function generateYearEndSummary() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const schedData = ss.getSheetByName('Schedule').getDataRange().getValues();
+  const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
+  const recordsData = ss.getSheetByName('School_Records').getDataRange().getValues();
+  const out = getSharedOutputSheet(ss);
+
+  const dataRows = entryData.slice(1).filter(r => r[0] !== '' && r[3] && r[2]);
+  const athleteSet = new Set();
+  const eventSet = new Set();
+  const meetSet = new Set();
+
+  // Track season PR improvements from current Data_Entry progression.
+  const bestByAthEvent = {};
+  const uniquePrEventSet = new Set();
+  const athletesWithPrSet = new Set();
+  let seasonPrImprovements = 0;
+
+  // Track school-record breaks against School_Records baseline columns when available.
+  const baselineInfo = getYearEndSchoolRecordBaseline(recordsData);
+  const schoolRecBaseline = baselineInfo.map;
+
+  const relaySeen = {};
+  const schoolRecordDetails = [];
+
+  dataRows.forEach((r, idx) => {
+    const meetNum = (r[0] || '').toString().trim();
+    const rowGender = (r[1] || '').toString().trim();
+    const eventName = (r[2] || '').toString().trim();
+    const athlete = (r[3] || '').toString().trim();
+    const relayTeam = (r[4] || '').toString().trim();
+    const result = formatCellValue(r[5]);
+
+    athleteSet.add(athlete);
+    eventSet.add(eventName);
+    if (meetNum) meetSet.add(meetNum);
+
+    if (!result || isNoMark(result)) return;
+
+    // PR tracking for individual events only.
+    if (!isRelayEvent(eventName)) {
+      const prKey = athlete.toLowerCase() + '||' + eventName;
+      const prevBest = bestByAthEvent[prKey];
+      if (!prevBest) {
+        bestByAthEvent[prKey] = result;
+        seasonPrImprovements++;
+        uniquePrEventSet.add(prKey);
+        athletesWithPrSet.add(athlete.toLowerCase());
+      } else if (isBetter(result, prevBest, eventName)) {
+        bestByAthEvent[prKey] = result;
+        seasonPrImprovements++;
+        uniquePrEventSet.add(prKey);
+        athletesWithPrSet.add(athlete.toLowerCase());
+      }
+    }
+
+    // School-record tracking; dedupe relay teams to avoid duplicate leg rows.
+    if (isRelayEvent(eventName)) {
+      const relayKey = meetNum + '||' + rowGender + '||' + eventName + '||' + (relayTeam || '1');
+      if (relaySeen[relayKey]) return;
+      relaySeen[relayKey] = true;
+    }
+
+    const srKey = rowGender + '||' + eventName;
+    const currentBaseline = schoolRecBaseline[srKey];
+
+    let brokeRecord = false;
+    if (!currentBaseline) {
+      brokeRecord = true;
+    } else if (isBetter(result, currentBaseline, eventName)) {
+      brokeRecord = true;
+    }
+
+    if (!brokeRecord) return;
+
+    schoolRecBaseline[srKey] = result;
+
+    let athleteLabel = athlete;
+    if (isRelayEvent(eventName)) {
+      const teamRows = dataRows.filter(x =>
+        (x[0] || '').toString().trim() == meetNum &&
+        (x[1] || '').toString().trim() == rowGender &&
+        (x[2] || '').toString().trim() == eventName &&
+        ((x[4] || '').toString().trim() || '1') == (relayTeam || '1')
+      );
+      const members = teamRows.map(x => (x[3] || '').toString().trim()).filter(Boolean);
+      athleteLabel = 'Team ' + (relayTeam || '1') + ': ' + members.join(', ');
+    }
+
+    const meetRow = schedData.find(s => s[0] == meetNum) || [];
+    const meetName = (meetRow[6] || '').toString().trim();
+    schoolRecordDetails.push([
+      rowGender,
+      eventName,
+      athleteLabel,
+      result,
+      meetNum,
+      meetName,
+      currentBaseline ? ('Prev: ' + currentBaseline) : 'No prior record on file'
+    ]);
+  });
+
+  out.clear();
+  out.getRange(1, 1, out.getMaxRows(), 12).clearNote();
+  out.setRowHeights(1, out.getMaxRows(), 21);
+
+  out.getRange('A1:G1').merge()
+    .setValue('YEAR-END SUMMARY (' + VERSION + ')')
+    .setBackground('#1c4587').setFontColor('white').setFontWeight('bold').setFontSize(15)
+    .setHorizontalAlignment('center');
+  out.setRowHeight(1, 34);
+
+  const metricRows = [
+    ['Athletes With Results', athleteSet.size, 'How many athletes had at least one result entered this season.'],
+    ['Meets With Results', meetSet.size, 'How many meets had results entered.'],
+    ['Events With Results', eventSet.size, 'How many different events had results entered.'],
+    ['Season PR Improvements', seasonPrImprovements, 'Every time an athlete bettered their own PR during the season. One athlete can count more than once in the same event.'],
+    ['Unique Athlete-Event PRs Set', uniquePrEventSet.size, 'How many athlete-and-event combinations had at least one PR during the season.'],
+    ['Athletes With At Least 1 PR', athletesWithPrSet.size, 'How many athletes set at least one PR in an individual event.'],
+    ['School Records Broken', schoolRecordDetails.length, 'How many school-record performances were found in this season\'s results.'],
+    ['School Record Count Method', baselineInfo.sourceLabel, 'Which starting record values were used to decide whether a mark counted as a new school record.'],
+    ['Generated', new Date().toLocaleString(), 'When this summary was created.']
+  ];
+
+  out.getRange(3, 1, metricRows.length, 3).setValues(metricRows);
+  out.getRange(3, 1, metricRows.length, 1).setFontWeight('bold').setBackground('#f3f3f3');
+  out.getRange(3, 2, metricRows.length, 2).setFontSize(9);
+  out.getRange(3, 1, metricRows.length, 3).setBorder(true, true, true, true, true, true);
+
+  const detailStart = 13;
+  out.getRange(detailStart, 1, 1, 7)
+    .setValues([['Gender', 'Event', 'Athlete(s)', 'Mark/Time', 'Meet #', 'Meet Name', 'Record Context']])
+    .setFontWeight('bold').setBackground('#d9ead3')
+    .setBorder(true, true, true, true, true, true);
+
+  if (schoolRecordDetails.length > 0) {
+    out.getRange(detailStart + 1, 1, schoolRecordDetails.length, 7)
+      .setValues(schoolRecordDetails)
+      .setBorder(true, true, true, true, true, true);
+  } else {
+    out.getRange(detailStart + 1, 1, 1, 7)
+      .merge()
+      .setValue('No school record breaks detected from current season data against School_Records baseline.')
+      .setFontStyle('italic').setFontColor('#666666')
+      .setHorizontalAlignment('left')
+      .setBorder(true, true, true, true, true, true);
+  }
+
+  out.setColumnWidth(1, 120);
+  out.setColumnWidth(2, 170);
+  out.setColumnWidth(3, 420);
+  out.setColumnWidth(4, 110);
+  out.setColumnWidth(5, 70);
+  out.setColumnWidth(6, 200);
+  out.setColumnWidth(7, 220);
+
+  ui.alert('✅ Year-End Summary generated in the Output tab.');
+}
+
+function getYearEndSchoolRecordBaseline(recordsData) {
+  const baselineMap = {};
+  let baselineCount = 0;
+  let fallbackCount = 0;
+  let baselineStamp = '';
+
+  recordsData.slice(1).forEach(r => {
+    const g = (r[0] || '').toString().trim();
+    const ev = (r[1] || '').toString().trim();
+    const currentRec = formatCellValue(r[3]);
+    const baselineRec = formatCellValue(r[6]);
+    const capturedAt = formatCellValue(r[7]);
+    if (!g || !ev) return;
+
+    if (baselineRec && !isNoMark(baselineRec)) {
+      baselineMap[g + '||' + ev] = baselineRec;
+      baselineCount++;
+      if (!baselineStamp && capturedAt) baselineStamp = capturedAt;
+      return;
+    }
+
+    if (currentRec && !isNoMark(currentRec)) {
+      baselineMap[g + '||' + ev] = currentRec;
+      fallbackCount++;
+    }
+  });
+
+  if (baselineCount > 0 && fallbackCount === 0) {
+    return {
+      map: baselineMap,
+      sourceLabel: baselineStamp
+        ? ('Compared against School_Records Baseline Record column (captured ' + baselineStamp + ')')
+        : 'Compared against School_Records Baseline Record column'
+    };
+  }
+
+  if (baselineCount > 0 && fallbackCount > 0) {
+    return {
+      map: baselineMap,
+      sourceLabel: 'Compared against School_Records Baseline Record column when present; ' + fallbackCount + ' event(s) used current Record as fallback'
+    };
+  }
+
+  return {
+    map: baselineMap,
+    sourceLabel: 'Compared against current School_Records Record column (conservative if records were updated during season)'
+  };
+}
+
+function captureSeasonRecordSnapshot() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  const records = ss.getSheetByName('School_Records');
+  if (!records) {
+    ui.alert('School_Records tab not found. Build/Rebuild system first.');
+    return;
+  }
+
+  const lastRow = records.getLastRow();
+  const hasBaseline = lastRow > 1
+    ? records.getRange(2, 7, lastRow - 1, 1).getValues().some(r => (r[0] || '').toString().trim() !== '')
+    : false;
+
+  if (hasBaseline) {
+    const confirm = ui.alert(
+      'Overwrite Existing Baseline?',
+      'School_Records baseline columns already have data. Replace baseline values from current Record values?',
+      ui.ButtonSet.YES_NO
+    );
+    if (confirm !== ui.Button.YES) return;
+  }
+
+  const status = writeSchoolRecordBaselineColumns(ss, true);
+  if (!status.ok) {
+    ui.alert(status.message);
+    return;
+  }
+  ui.alert('✅ School record baseline captured (' + status.count + ' records).');
+}
+
+function writeSchoolRecordBaselineColumns(ss, allowOverwrite) {
+  const records = ss.getSheetByName('School_Records');
+  if (!records) {
+    return { ok: false, count: 0, message: 'School_Records tab not found. Build/Rebuild system first.' };
+  }
+
+  const rows = records.getDataRange().getValues();
+  if (rows.length <= 1) {
+    return { ok: false, count: 0, message: 'No School_Records rows found to baseline.' };
+  }
+
+  const hasBaseline = rows.slice(1).some(r => (r[6] || '').toString().trim() !== '');
+  if (!allowOverwrite && hasBaseline) {
+    return { ok: false, count: 0, message: 'School_Records baseline columns already have data.' };
+  }
+
+  records.getRange(1, 7, 1, 2)
+    .setValues([['Baseline Record', 'Baseline Captured']])
+    .setBackground('#444444').setFontColor('white').setFontWeight('bold');
+  records.setColumnWidth(7, 120);
+  records.setColumnWidth(8, 170);
+
+  const timestamp = new Date();
+  const baselineVals = [];
+  const capturedVals = [];
+  let count = 0;
+
+  rows.slice(1).forEach(r => {
+    const g = (r[0] || '').toString().trim();
+    const ev = (r[1] || '').toString().trim();
+    const rec = formatCellValue(r[3]);
+    if (g && ev && rec && !isNoMark(rec)) {
+      baselineVals.push([rec]);
+      capturedVals.push([timestamp]);
+      count++;
+    } else {
+      baselineVals.push(['']);
+      capturedVals.push(['']);
+    }
+  });
+
+  const rowCount = rows.length - 1;
+  if (rowCount > 0) {
+    // Reset prior season highlighting so fresh school-record highlighting can stand out.
+    records.getRange(2, 1, rowCount, 8)
+      .setBackground(null)
+      .setFontColor('#000000')
+      .setFontWeight('normal')
+      .setFontStyle('normal');
+  }
+  records.getRange(2, 7, rowCount, 1).setValues(baselineVals);
+  records.getRange(2, 8, rowCount, 1).setValues(capturedVals);
+  records.getRange(2, 8, rowCount, 1).setNumberFormat('m/d/yyyy h:mm:ss AM/PM');
+
+  return { ok: true, count: count, message: '' };
+}
+
+/**
+ * Copies current-season Roster PRs into Historical_PRs with the given year.
+ * Appends one row per athlete to Historical_PRs (does not overwrite existing rows).
+ * Returns { count } of rows added.
+ */
+function copyRosterPRsToHistorical(ss, year) {
+  const rosterSh = ss.getSheetByName('Roster');
+  const histSh   = ss.getSheetByName('Historical_PRs');
+  if (!rosterSh || !histSh) return { count: 0 };
+
+  const rosterData = rosterSh.getDataRange().getValues();
+  if (rosterData.length <= 1) return { count: 0 };
+
+  const rosterHeaders = rosterData[0];
+  const newRows = [];
+
+  rosterData.slice(1).forEach(r => {
+    const athleteName = (r[0] || '').toString().trim();
+    const displayName = (r[1] || '').toString().trim();
+    if (!athleteName && !displayName) return; // skip blank rows
+
+    // Row layout matches Historical_PRs: [Athlete Name, Display Name, Year, ...FULL_EVT...]
+    const row = [athleteName, displayName, year];
+    FULL_EVT.forEach(ev => {
+      const idx = rosterHeaders.indexOf(ev);
+      row.push(idx >= 0 ? r[idx] : '');
+    });
+    newRows.push(row);
+  });
+
+  if (newRows.length === 0) return { count: 0 };
+
+  const lastHistRow = histSh.getLastRow();
+  histSh.getRange(lastHistRow + 1, 1, newRows.length, newRows[0].length).setValues(newRows);
+  return { count: newRows.length };
+}
+
+/**
+ * Remove Historical_PRs rows whose athletes are no longer present in the current Roster.
+ * Use after the new-season roster has been entered to purge graduated athletes.
+ */
+function purgeGraduatedAthletesFromHistorical() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+  const rosterSh = ss.getSheetByName('Roster');
+  const histSh = ss.getSheetByName('Historical_PRs');
+
+  if (!rosterSh || !histSh) {
+    ui.alert('❌ Missing required tab(s). Need both Roster and Historical_PRs.');
+    return;
+  }
+
+  const rosterData = rosterSh.getDataRange().getValues();
+  const histData = histSh.getDataRange().getValues();
+
+  if (rosterData.length <= 1) {
+    ui.alert('⚠️ Roster is empty. Enter the new season roster first, then run this purge again.');
+    return;
+  }
+
+  if (histData.length <= 1) {
+    ui.alert('⚠️ Historical_PRs is empty. Nothing to purge.');
+    return;
+  }
+
+  const activeNames = new Set();
+  rosterData.slice(1).forEach(r => {
+    const athleteName = (r[0] || '').toString().trim().toLowerCase();
+    const displayName = (r[1] || '').toString().trim().toLowerCase();
+    if (athleteName) activeNames.add(athleteName);
+    if (displayName) activeNames.add(displayName);
+  });
+
+  const keepRows = [];
+  const removedRows = [];
+
+  histData.slice(1).forEach(r => {
+    const athleteName = (r[0] || '').toString().trim();
+    const displayName = (r[1] || '').toString().trim();
+    const keyA = athleteName.toLowerCase();
+    const keyB = displayName.toLowerCase();
+    const matchesCurrentRoster = (keyA && activeNames.has(keyA)) || (keyB && activeNames.has(keyB));
+    if (matchesCurrentRoster) {
+      keepRows.push(r);
+    } else {
+      removedRows.push(athleteName || displayName || '(blank)');
+    }
+  });
+
+  if (removedRows.length === 0) {
+    ui.alert('✅ Historical_PRs already matches the current roster. No graduated athletes found.');
+    return;
+  }
+
+  const confirm = ui.alert(
+    'Purge Graduated Athletes?',
+    'This will remove ' + removedRows.length + ' Historical_PRs row(s) for athletes not found in the current Roster.\n\n' +
+      'Examples:\n' + removedRows.slice(0, 10).map(name => '• ' + name).join('\n') +
+      (removedRows.length > 10 ? '\n• ...and ' + (removedRows.length - 10) + ' more' : '') +
+      '\n\nThis is usually run after the new season roster is entered.',
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+
+  const width = histSh.getLastColumn();
+  if (histSh.getLastRow() > 1) {
+    histSh.getRange(2, 1, histSh.getMaxRows() - 1, width).clearContent();
+    histSh.getRange(2, 1, histSh.getMaxRows() - 1, width).clearNote();
+  }
+  if (keepRows.length > 0) {
+    histSh.getRange(2, 1, keepRows.length, histData[0].length).setValues(keepRows);
+  }
+
+  ui.alert('✅ Historical_PRs purged. Removed ' + removedRows.length + ' graduated athlete row(s).');
+}
+
+function createNextSeasonFile() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ui = SpreadsheetApp.getUi();
+
+  // ── STEP 1: Capture school record baseline on THIS (current) file ──
+  // Overwrite so the end-of-season baseline always reflects the latest record table.
+  writeSchoolRecordBaselineColumns(ss, true);
+
+  const season = new Date().getFullYear(); // current/ending season year
+
+  const defaultName = 'Track ' + (season + 1);
+  const resp = ui.prompt(
+    'Create Next Season File',
+    'Name for the new spreadsheet file:\n(Default: ' + defaultName + ')',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (resp.getSelectedButton() !== ui.Button.OK) return;
+
+  const newName = (resp.getResponseText() || '').toString().trim() || defaultName;
+
+  const srcFile = DriveApp.getFileById(ss.getId());
+  const copyFile = srcFile.makeCopy(newName);
+  const copySs = SpreadsheetApp.openById(copyFile.getId());
+
+  const clearDataRows = (sheetName, width) => {
+    const sh = copySs.getSheetByName(sheetName);
+    if (!sh) return;
+    const lastRow = sh.getLastRow();
+    if (lastRow > 1) sh.getRange(2, 1, lastRow - 1, width).clearContent();
+  };
+
+  const clearOutputSheet = (sheetName) => {
+    const sh = copySs.getSheetByName(sheetName);
+    if (!sh) return;
+    sh.clear();
+    sh.getRange(1, 1, sh.getMaxRows(), Math.max(9, sh.getLastColumn())).clearNote();
+  };
+
+  // ── STEP 2: Archive Roster PRs → Historical_PRs (current season year) ──
+  const histResult = copyRosterPRsToHistorical(copySs, season);
+
+  // ── STEP 3: Clear Data_Entry ──
+  clearDataRows('Data_Entry', 9);
+
+  // ── STEP 4: Clear Schedule ──
+  clearDataRows('Schedule', 9);
+
+  // ── STEP 5: Clear Roster rows 2+ and leave a setup note ──
+  const rosterSh = copySs.getSheetByName('Roster');
+  if (rosterSh && rosterSh.getLastRow() > 1) {
+    const rosterWidth = rosterSh.getLastColumn();
+    rosterSh.getRange(2, 1, rosterSh.getLastRow() - 1, rosterWidth).clearContent();
+    rosterSh.getRange('A2').setNote(
+      'NEW SEASON: Roster has been cleared.\n' +
+      'Once athlete names are entered, copy PRs from the Historical_PRs tab ' +
+      '(filter by Year = ' + season + ') to pre-populate PRs for returning athletes.'
+    );
+  }
+
+  // ── STEP 6: Seed new baseline from new file\'s School_Records ──
+  const seededBaseline = writeSchoolRecordBaselineColumns(copySs, true);
+
+  // ── Legacy cleanup: remove old snapshot tab if present ──
+  const legacySnapshot = copySs.getSheetByName('Season_Record_Snapshot');
+  if (legacySnapshot) copySs.deleteSheet(legacySnapshot);
+
+  // ── STEP 7: Clear generated output/report tabs ──
+  ['Lineup_View', 'Event_Form_Printable', 'Athlete_Recaps', 'Output', 'Top_Marks', 'Filtered_Results', 'Placers_Export', 'Year_End_Summary']
+    .forEach(clearOutputSheet);
+
+  // ── STEP 8: Clear Girls_Results / Boys_Results backup tabs if present ──
+  ['Girls_Results', 'Boys_Results'].forEach(name => {
+    const sh = copySs.getSheetByName(name);
+    if (!sh) return;
+    sh.clear();
+    sh.getRange(1, 1, sh.getMaxRows(), Math.max(9, sh.getLastColumn())).clearNote();
+  });
+
+  // ── STEP 9: Reset Home tab selections ──
+  const home = copySs.getSheetByName('Home');
+  if (home) {
+    home.getRange('B3').clearContent();
+    home.getRange('B4').clearContent();
+    home.getRange('B5').setValue(7);
+    home.getRange(HOME_STATUS_CELL).setValue('').setBackground(null).setFontColor('#000000').setFontWeight('normal');
+  }
+
+  ui.alert(
+    '✅ Next Season File Created',
+    'New file: ' + newName + '\n\nURL:\n' + copySs.getUrl() +
+      '\n\nCompleted automatically:\n' +
+      '  ✅ School record baseline captured on current file\n' +
+      '  ✅ PRs archived to Historical_PRs (' + histResult.count + ' athletes, year ' + season + ')\n' +
+      '  ✅ Data_Entry cleared\n' +
+      '  ✅ Schedule cleared\n' +
+      '  ✅ Roster cleared (see note in A2 about PRs)\n' +
+      '  ✅ Output/report tabs cleared\n' +
+      '  ✅ Girls_Results / Boys_Results backup tabs cleared (if present)\n' +
+      '  ✅ School_Records baseline seeded: ' + (seededBaseline.ok ? seededBaseline.count + ' records' : seededBaseline.message) + '\n\n' +
+      'To do in the new file:\n' +
+      '1. Re-create the installable trigger (onEditInstallable)\n' +
+      '2. Enter Roster athletes for the new season\n' +
+      '3. Copy PRs from Historical_PRs (Year ' + season + ') for returning athletes\n' +
+      '4. If you want to remove graduated athletes from Historical_PRs, run the new purge menu item after the roster is entered\n' +
+      '5. Enter Schedule meets\n' +
+      '6. Run Build / Rebuild if structure changed',
     ui.ButtonSet.OK
   );
 }
@@ -4097,7 +4738,7 @@ function findPR(rData, athleteName, eventName) {
  */
 function generateTopMarks() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName('Top_Marks');
+  const sheet = getSharedOutputSheet(ss);
   const home = ss.getSheetByName('Home');
   const entryData = ss.getSheetByName('Data_Entry').getDataRange().getValues();
   
@@ -4230,7 +4871,7 @@ function generateTopMarks() {
   sheet.setColumnWidth(3, 180);
   sheet.setColumnWidth(4, 100);
   
-  SpreadsheetApp.getUi().alert('✅ Top Marks report generated!');
+  SpreadsheetApp.getUi().alert('✅ Top Marks report generated in the Output tab!');
 }
 
 // ── 6. ATHLETE RECAPS (YEAR-END) ──────────────────────────────
@@ -4253,8 +4894,13 @@ function generateAllAthleteRecaps() {
   
   let currentRow = 1;
   
-  // Get all unique athletes from roster
-  const athletes = rosterData.slice(1).filter(r => r[0]); // has athlete name
+  // Build athlete list in exact Roster row order.
+  // Include rows with either Athlete Name (col A) or Display Name (col B).
+  const athletes = rosterData.slice(1).filter(r => {
+    const athleteName = (r[0] || '').toString().trim();
+    const displayName = (r[1] || '').toString().trim();
+    return athleteName || displayName;
+  });
   
   if (athletes.length === 0) {
     SpreadsheetApp.getUi().alert('⚠️ No athletes found in Roster tab.');
@@ -4273,8 +4919,8 @@ function generateAllAthleteRecaps() {
   }
   
   athletes.forEach((athlete, athleteIdx) => {
-    const athleteName = athlete[0].toString().trim();
-    const displayName = (athlete[1] || athleteName).toString().trim();
+    const athleteName = (athlete[0] || athlete[1] || '').toString().trim();
+    const displayName = (athlete[1] || athlete[0] || '').toString().trim();
     
     // Check if we're running out of rows (Google Sheets max is ~10000)
     if (currentRow > 9000) {
@@ -4536,14 +5182,21 @@ function generateAllAthleteRecaps() {
   });
   
   // Set column widths for 3-column layout
-  sheet.setColumnWidth(1, 140);  // Meet col 1 - event name
+  sheet.setColumnWidth(1, 100);  // Meet col 1 - event name
   sheet.setColumnWidth(2, 100);  // Meet col 1 - mark (wider for relay times)
   sheet.setColumnWidth(3, 15);   // gutter
-  sheet.setColumnWidth(4, 140);  // Meet col 2 - event name
+  sheet.setColumnWidth(4, 100);  // Meet col 2 - event name
   sheet.setColumnWidth(5, 100);  // Meet col 2 - mark (wider for relay times)
   sheet.setColumnWidth(6, 15);   // gutter
-  sheet.setColumnWidth(7, 140);  // PR - event name
+  sheet.setColumnWidth(7, 100);  // PR - event name
   sheet.setColumnWidth(8, 80);   // PR - mark
+
+  // Athlete Recaps formatting requests
+  sheet.getRange("A:A").setWrap(true);
+  sheet.getRange("B:B").setWrap(true);
+  sheet.getRange("D:D").setWrap(true);
+  sheet.getRange("E:E").setWrap(true);
+  sheet.getRange("H:H").setHorizontalAlignment("right");
   
   SpreadsheetApp.getUi().alert('✅ Athlete Recaps generated for ' + athletes.length + ' athletes!');
 }

@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certificate of Achievement - Bennett Johnson</title>
+    <!-- Importing elegant fonts for the certificate -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Great+Vibes&family=Montserrat:ital,wght@0,400;0,600;1,400&display=swap" rel="stylesheet">
+    
+    <style>
+        :root {
+            --maroon: #8B1833; /* OLOL Burgundy/Maroon */
+            --silver: #808285; /* OLOL Silver/Gray */
+            --dark: #333333;
+        }
+
+        body {
+            margin: 0;
+            padding: 40px 20px;
+            background-color: #f4f4f5;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            font-family: 'Montserrat', sans-serif;
+        }
+
+        /* Print Button Styles */
+        .print-controls {
+            margin-bottom: 20px;
+        }
+        .print-btn {
+            background-color: var(--maroon);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-family: 'Montserrat', sans-serif;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: background-color 0.3s;
+        }
+        .print-btn:hover {
+            background-color: #6a1226;
+        }
+
+        /* Certificate Dimensions for Standard US Letter Landscape (11 x 8.5 in) */
+        .certificate-wrapper {
+            width: 1056px; /* 11 inches at 96 DPI */
+            height: 826px; /* 8.5 inches at 96 DPI */
+            background-color: white;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+            position: relative;
+            box-sizing: border-box;
+            padding: 30px;
+            overflow: hidden;
+        }
+
+        /* Decorative Borders */
+        .border-outer {
+            border: 2px solid var(--silver);
+            height: 100%;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 6px;
+        }
+
+        .border-inner {
+            border: 4px solid var(--maroon);
+            height: 100%;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 32px;
+            display: flex;
+            flex-direction: column;
+            text-align: center;
+            position: relative;
+        }
+
+        /* Header Section */
+        .logo-container {
+            margin-bottom: 8px;
+        }
+        .logo {
+            max-height: 96px;
+            width: auto;
+            object-fit: contain;
+        }
+
+        h1 {
+            font-family: 'Cinzel', serif;
+            color: var(--maroon);
+            font-size: 34px;
+            margin: 6px 0;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
+
+        .subtitle {
+            font-size: 17px;
+            color: var(--silver);
+            font-style: italic;
+            margin-bottom: 16px;
+        }
+
+        /* Body Section */
+        .recipient-name {
+            font-family: 'Great Vibes', cursive;
+            font-size: 72px;
+            color: var(--dark);
+            margin: 10px 0 14px 0;
+            line-height: 1;
+            padding: 0 60px;
+            display: inline-block;
+            border-bottom: 2px solid var(--silver);
+        }
+
+        .achievement-text {
+            font-size: 20px;
+            color: #555;
+            margin: 8px 0;
+        }
+
+        .record-title {
+            font-family: 'Cinzel', serif;
+            font-size: 28px;
+            color: var(--maroon);
+            font-weight: 700;
+            margin: 10px 0;
+            letter-spacing: 1px;
+        }
+
+        .metric {
+            font-size: 24px;
+            font-weight: 600;
+            color: var(--dark);
+            margin-bottom: 3px;
+        }
+
+        .relay-splits {
+            font-size: 16px;
+            color: #555;
+            margin-bottom: 3px;
+        }
+
+        .date {
+            font-size: 18px;
+            color: var(--silver);
+            font-style: italic;
+            margin-top: 4px;
+        }
+
+        /* Signatures Section */
+        .signatures-container {
+            margin-top: auto;
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            row-gap: 30px;
+            column-gap: 30px;
+            padding: 0 20px;
+        }
+
+        .signature-block {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-end;
+        }
+
+        .signature-line {
+            width: 80%;
+            border-bottom: 1px solid var(--dark);
+            margin-bottom: 8px;
+            height: 32px; /* Space for physical signature */
+        }
+
+        .coach-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--dark);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        /* Responsive scaling for smaller screens (Preview only, won't affect print) */
+        @media screen and (max-width: 1100px) {
+            body { padding: 20px 10px; }
+            .certificate-wrapper {
+                transform: scale(0.8);
+                transform-origin: top center;
+                margin-bottom: -160px; /* Adjusting space lost by scale */
+            }
+        }
+        @media screen and (max-width: 850px) {
+            .certificate-wrapper {
+                transform: scale(0.6);
+                margin-bottom: -320px;
+            }
+        }
+        @media screen and (max-width: 650px) {
+            .certificate-wrapper {
+                transform: scale(0.45);
+                margin-bottom: -440px;
+            }
+        }
+
+        /* Print CSS - Ensures perfect physical printing */
+        @media print {
+            @page {
+                size: letter landscape;
+                margin: 0; /* Let the certificate handle margins */
+            }
+            body {
+                margin: 0;
+                padding: 0;
+                background-color: white;
+                align-items: flex-start;
+            }
+            .print-controls {
+                display: none;
+            }
+            .certificate-wrapper {
+                box-shadow: none;
+                transform: none !important; /* Override responsive scaling on print */
+                width: 11in;
+                height: 8.5in;
+                page-break-after: avoid;
+                margin: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Print Button (Hidden during print) -->
+    <div class="print-controls no-print">
+        <button class="print-btn" onclick="window.print()">Print Certificate</button>
+    </div>
+
+    <!-- Certificate Content -->
+    <div class="certificate-wrapper">
+        <div class="border-outer">
+            <div class="border-inner">
+                
+                <!-- Logo & Header -->
+                <div class="logo-container">
+                    <img src="OLOL Logo.jpg" alt="Our Lady of Lourdes Catholic School Logo" class="logo" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'200\' height=\'100\'><text x=\'50%\' y=\'50%\' dominant-baseline=\'middle\' text-anchor=\'middle\' fill=\'%238B1833\' font-family=\'serif\' font-size=\'14\'>[ OLOL Logo ]</text></svg>';">
+                </div>
+                
+                <h1>Certificate of Achievement</h1>
+                <div class="subtitle">This certificate is proudly presented to</div>
+                
+                <!-- Student & Achievement Details -->
+                <div class="recipient-name">Athlete Name</div>
+                
+                <div class="achievement-text">in recognition of outstanding athletic excellence for setting the</div>
+                <div class="record-title">Event</div>
+                <div class="metric">Time/Distance: </div>
+                <div class="relay-splits">Relay Split: </div>
+                <div class="date">Recorded on </div>
+                
+                <!-- Signature Lines (Grid layout for 6 coaches) -->
+                <div class="signatures-container">
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Ty</div>
+                    </div>
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Mike</div>
+                    </div>
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Scott</div>
+                    </div>
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Eric</div>
+                    </div>
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Liz</div>
+                    </div>
+                    <div class="signature-block">
+                        <div class="signature-line"></div>
+                        <div class="coach-name">Coach Laura</div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+</body>
+</html>
